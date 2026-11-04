@@ -234,66 +234,104 @@ def _local_matrix_from_node(node) -> np.ndarray:
 
 def _unpack_rgb565(c: int) -> Tuple[int, int, int]:
     r = (c >> 11) & 0x1F
-    g = (c >> 5) & 0x7F
+    g = (c >> 5) & 0x3F
     b = c & 0x1F
     return (r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)
 
 
-def decode_dxt1(data: bytes, width: int, height: int) -> bytes:
-    """Decode DXT1 compressed data to RGBA8."""
+def _dxt_palette(c0: int, c1: int):
+    r0, g0, b0 = _unpack_rgb565(c0)
+    r1, g1, b1 = _unpack_rgb565(c1)
+    if c0 > c1:
+        return [(r0, g0, b0), (r1, g1, b1),
+                ((2 * r0 + r1) // 3, (2 * g0 + g1) // 3, (2 * b0 + b1) // 3),
+                ((r0 + 2 * r1) // 3, (g0 + 2 * g1) // 3, (b0 + 2 * b1) // 3)]
+    return [(r0, g0, b0), (r1, g1, b1),
+            ((r0 + r1) // 2, (g0 + g1) // 2, (b0 + b1) // 2),
+            (0, 0, 0)]
+
+
+def _decode_dxt_blocks(data: bytes, width: int, height: int, block: int,
+                       dxt5: bool) -> bytes:
+    """Decode the base mipmap level of a DXT1/DXT5 stream -> RGBA8.
+
+    Only the first (w/4)*(h/4) blocks are read, so trailing mip levels
+    (BD stores a full chain) are ignored.
+    """
     out = bytearray(width * height * 4)
-    n_blocks_x = (width + 3) // 4
-    n_blocks_y = (height + 3) // 4
-    for by in range(n_blocks_y):
-        for bx in range(n_blocks_x):
-            base = (by * n_blocks_x + bx) * 16
-            c0 = data[base] | (data[base + 1] << 8)
-            c1 = data[base + 2] | (data[base + 3] << 8)
-            r0, g0, b0 = _unpack_rgb565(c0)
-            r1, g1, b1 = _unpack_rgb565(c1)
-            if c0 > c1:
-                palette = [
-                    (r0, g0, b0), (r1, g1, b1),
-                    ((2 * r0 + r1) // 3, (2 * g0 + g1) // 3, (2 * b0 + b1) // 3),
-                    ((r0 + 2 * r1) // 3, (g0 + 2 * g1) // 3, (b0 + 2 * b1) // 3),
-                ]
-            else:
-                palette = [
-                    (r0, g0, b0), (r1, g1, b1),
-                    ((r0 + r1) // 2, (g0 + g1) // 2, (b0 + b1) // 2),
-                    (0, 0, 0),
-                ]
-            codes = data[base + 8:base + 16]
-            idx = 0
-            for yy in range(4):
-                for xx in range(4):
-                    pix = by * 4 + yy
-                    pixx = bx * 4 + xx
-                    code = (codes[idx + 1] << 2) | (codes[idx] & 0x03)
-                    idx += 1
-                    if pix >= height or pixx >= width:
-                        continue
-                    r, g, b = palette[code]
-                    o = (pix * width + pixx) * 4
-                    out[o] = r
-                    out[o + 1] = g
-                    out[o + 2] = b
+    nxb = (width + 3) // 4
+    nyb = (height + 3) // 4
+    for by in range(nyb):
+        for bx in range(nxb):
+            base = (by * nxb + bx) * block
+            pal = _dxt_palette(data[base] | data[base + 1] << 8,
+                               data[base + 2] | data[base + 3] << 8)
+            for i in range(16):
+                py = by * 4 + (i >> 2)
+                px = bx * 4 + (i & 3)
+                if py >= height or px >= width:
+                    continue
+                code = (data[base + 4 + (i >> 2)] >> ((i & 3) * 2)) & 3
+                r, g, b = pal[code]
+                o = (py * width + px) * 4
+                out[o] = r
+                out[o + 1] = g
+                out[o + 2] = b
+                if dxt5:
+                    a0 = data[base + 8]
+                    a1 = data[base + 9]
+                    a = (data[base + 10 + (i >> 2)] >> ((i & 3) * 2)) & 3
+                    if a == 0:
+                        av = a0
+                    elif a == 1:
+                        av = a1
+                    elif a0 > a1:
+                        av = (2 * a0 + a1 + 1) // 3 if a == 2 else (a0 + 2 * a1 + 1) // 3
+                    else:
+                        av = (a0 + a1) // 2 if a == 2 else (0 if a == 3 else 255)
+                    out[o + 3] = av
+                else:
                     out[o + 3] = 255
     return bytes(out)
 
 
-def read_dds(path: str) -> Tuple[bytes, int, int]:
-    """Read a DXT1 DDS file -> (rgba8, width, height)."""
-    with open(path, "rb") as fh:
-        d = fh.read()
+def decode_dds(d: bytes) -> Tuple[bytes, int, int]:
+    """Decode the base level of a BD .dds -> (rgba8, width, height).
+
+    Verified BD DDS layout: +0x00 "DDS ", +0x0C height, +0x10 width,
+    +0x24 "PXDE" custom tag, +0x54 format (b'DXT1'/b'DXT5'/zero=raw RGBA),
+    +0x80 pixel data (base level first, then full mip chain).
+    """
     if d[:4] != b"DDS ":
         raise ValueError("not a DDS file")
-    height = struct.unpack_from("<I", d, 12)[0]
-    width = struct.unpack_from("<I", d, 16)[0]
-    fourcc = d[84:88]
-    if fourcc != b"DXT1":
-        raise ValueError(f"unsupported DDS fourcc {fourcc!r}")
-    return decode_dxt1(d[128:], width, height), width, height
+    height = struct.unpack_from("<I", d, 0x0C)[0]
+    width = struct.unpack_from("<I", d, 0x10)[0]
+    fmt = d[0x54:0x58]
+    data = d[128:]
+    nxb = (width + 3) // 4
+    nyb = (height + 3) // 4
+    if fmt == b"DXT1":
+        need = nxb * nyb * 8
+        if len(data) < need:
+            raise ValueError("truncated DXT1 data")
+        return _decode_dxt_blocks(data, width, height, 8, False), width, height
+    if fmt == b"DXT5":
+        need = nxb * nyb * 16
+        if len(data) < need:
+            raise ValueError("truncated DXT5 data")
+        return _decode_dxt_blocks(data, width, height, 16, True), width, height
+    if fmt == b"\x00\x00\x00\x00":
+        need = width * height * 4
+        if len(data) < need:
+            raise ValueError("truncated raw RGBA data")
+        return data[:need], width, height
+    raise ValueError(f"unsupported DDS pixel format {fmt!r}")
+
+
+def read_dds(path: str) -> Tuple[bytes, int, int]:
+    """Read a .dds base level -> (rgba8, width, height)."""
+    with open(path, "rb") as fh:
+        return decode_dds(fh.read())
 
 
 def _png_chunk(tag: bytes, payload: bytes) -> bytes:
@@ -359,8 +397,8 @@ class _GLBBuilder:
         self.json["accessors"] = self.accessors
         j = json.dumps(self.json, separators=(",", ":")).encode("utf-8")
         j += b" " * ((4 - len(j) % 4) % 4)
-        out = struct.pack("<III", 12 + 8 + len(j) + 8 + len(self.bin),
-                          0x46546C67, 2)
+        out = struct.pack("<III", 0x46546C67, 2,
+                          12 + 8 + len(j) + 8 + len(self.bin))
         out += struct.pack("<II", len(j), 0x4E4F534A) + j
         out += struct.pack("<II", len(self.bin), 0x004E4942) + bytes(self.bin)
         return out
@@ -467,8 +505,9 @@ def export_gmd(gmd_path: str, glb_path: str,
             return None
         m = attr_set.material.origin_data
         tex_name = getattr(attr_set, "texture_diffuse", None) or ""
+        alpha_name = getattr(attr_set, "texture_alpha", None) or ""
         key = (tuple(m.diffuse), m.opacity, tuple(m.specular),
-               round(float(m.power), 3), tex_name)
+               round(float(m.power), 3), tex_name, alpha_name)
         for i, k in enumerate(mat_cache):
             if k == key:
                 return i
@@ -479,6 +518,7 @@ def export_gmd(gmd_path: str, glb_path: str,
                                   max(0.0, min(1.0, m.opacity / 255.0))]
         pbr["roughnessFactor"] = max(0.04, min(1.0, 1.0 - float(m.power) / 255.0))
         pbr["metallicFactor"] = 0.0
+        mat["name"] = tex_name or f"material_{len(materials)}"
         mat["pbrMetallicRoughness"] = pbr
         if m.opacity < 255:
             mat["alphaMode"] = "BLEND"
@@ -488,10 +528,31 @@ def export_gmd(gmd_path: str, glb_path: str,
             if os.path.isfile(tex_path):
                 try:
                     rgba, w, h = read_dds(tex_path)
-                    v = glb.add_view(encode_png(rgba, w, h), None)
+                    a = None
+                    # composite the separate GMD alpha mask into the PNG alpha
+                    if alpha_name:
+                        a_path = os.path.join(dds_dir, f"{alpha_name}.dds")
+                        if os.path.isfile(a_path):
+                            try:
+                                a_rgba, aw, ah = read_dds(a_path)
+                                if (aw, ah) == (w, h):
+                                    a = a_rgba[3::4]
+                                    if a.min() == 255:  # DXT1 mask: use luma
+                                        r = a_rgba[0::4].astype(np.int32)
+                                        g = a_rgba[1::4].astype(np.int32)
+                                        b = a_rgba[2::4].astype(np.int32)
+                                        a = ((r * 77 + g * 151 + b * 29) >> 8)
+                                    rgba = bytearray(rgba)
+                                    rgba[3::4] = a
+                            except Exception:
+                                pass
+                    v = glb.add_view(encode_png(bytes(rgba), w, h), None)
                     images.append({"bufferView": v, "mimeType": "image/png"})
                     textures.append({"source": len(images) - 1})
                     pbr["baseColorTexture"] = {"index": len(textures) - 1}
+                    if a is not None and a.min() < 250 and mat.get("alphaMode") != "BLEND":
+                        mat["alphaMode"] = "BLEND"
+                        mat["doubleSided"] = True
                 except Exception:
                     pass
         materials.append(mat)
