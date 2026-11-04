@@ -585,7 +585,9 @@ def export_gmd(gmd_path: str, glb_path: str,
             if skin_idx is not None and buf.bone_data is not None and buf.weight_data is not None:
                 bones = np.asarray(buf.bone_data)[:, :4].astype(np.int64)
                 weights = np.asarray(buf.weight_data, dtype=np.float32)[:, :4].copy()
-                rel_bones = gm.relevant_bones
+                # plain GMDMesh (not GMDSkinnedMesh) has no relevant_bones:
+                # its bone_data indices are relative to the object's own bone
+                rel_bones = getattr(gm, "relevant_bones", None) or []
                 nb = len(rel_bones)
                 remap = np.full((n, 4), -1, dtype=np.int64)
                 valid = (bones >= 0) & (bones < nb)
@@ -598,14 +600,18 @@ def export_gmd(gmd_path: str, glb_path: str,
                 # bone node): zero the weight for that slot
                 weights[~valid | (remap < 0)] = 0.0
                 if not bool(np.any(weights)):
-                    # rigid BD mesh: bind 100% to first bone of the matrix list
+                    # rigid BD mesh: bind 100% to first bone of the matrix list;
+                    # plain GMDMesh (no matrix list) binds to the object's bone
                     if nb:
-                        remap = np.zeros((n, 4), dtype=np.int64)
-                        remap[:, 0] = bone_name_to_joint.get(rel_bones[0].name, 0)
-                        weights = np.zeros((n, 4), dtype=np.float32)
-                        weights[:, 0] = 1.0
+                        fallback = bone_name_to_joint.get(rel_bones[0].name, 0)
                     else:
-                        continue
+                        parent = getattr(node, "parent", None)
+                        fallback = bone_name_to_joint.get(parent.name, 0) \
+                            if parent is not None else 0
+                    remap = np.zeros((n, 4), dtype=np.int64)
+                    remap[:, 0] = fallback
+                    weights = np.zeros((n, 4), dtype=np.float32)
+                    weights[:, 0] = 1.0
                 joints_all.append(np.where(remap < 0, 0, remap).astype(np.uint16))
                 weights_all.append(weights)
             idx = np.frombuffer(np.asarray(gm.triangles.triangle_list, dtype=np.uint32).tobytes(),
@@ -642,7 +648,8 @@ def export_gmd(gmd_path: str, glb_path: str,
 
         # object-level GMD metadata for re-import: matrix list per sub-mesh
         obj_extras = {"gmd_matrix_lists": [
-            [rb.name for rb in gm.relevant_bones] for gm in mesh_list
+            [rb.name for rb in (getattr(gm, "relevant_bones", None) or [])]
+            for gm in mesh_list
         ]}
         if "extras" in nodes[gidx]:
             nodes[gidx]["extras"].update(obj_extras)
