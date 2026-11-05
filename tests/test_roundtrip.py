@@ -29,6 +29,14 @@ os.makedirs(OUT, exist_ok=True)
 
 results = []
 
+# Regression: two 40-byte declarations have different UV offsets.
+probe = gmd_mod.GMD(open(GMD_FILES[0], 'rb').read())
+for sid, stream in enumerate(probe.streams):
+    if stream['flags'] == 0x1fe0ffc3:
+        assert probe.uv_offset(sid) == 36
+    elif stream['flags'] == 0x28e0ffc3:
+        assert probe.uv_offset(sid) == 32
+
 
 def fresh():
     bpy.ops.wm.read_factory_settings(use_empty=True)

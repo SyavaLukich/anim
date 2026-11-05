@@ -115,3 +115,18 @@ materials or deformation. Do not delete objects before patch export.
 
 `tests/audit_duplicate_geometry.py <model-directory>` reports exact coincident
 triangle sets without requiring Blender. This is a positional comparison only.
+
+## Material preview corrections (v0.1.3)
+
+Vertex declarations, not stride alone, determine UV placement. The tested
+40-byte declaration `0x1fe0ffc3` has color at +32 and binary16 UV at +36;
+`0x28e0ffc3` has UV at +32 and opaque extra data at +36 (no longer exposed
+as an unverified UV2). The 24-byte declaration uses UV at +20.
+
+Materials use the first available diffuse `(d)` texture. Game normal and
+mask textures are loaded as nodes but no longer automatically connected to
+normal/alpha: their packed channel conventions are not confirmed. This is a
+basic diffuse preview, not a recreation of the original game shaders.
+A local Cycles render in Blender 4.5 confirms improved face/clothing mapping,
+but residual overlapping/variant geometry artifacts remain (notably chest
+and knee details). Blender 5.1 has not been locally validated.

@@ -206,14 +206,13 @@ class GMD:
             nrm = tuple((d[off + 20 + j] - 128) / 127.0 for j in range(3))
         uv = None
         uv2 = None
-        if st >= 32:
-            uv_off = off + (32 if st >= 36 else 28)
+        if st >= 24:
+            uv_off = off + self.uv_offset(sid)
             def read_pair(o):
                 vals = struct.unpack_from('>2e', d, o)
                 return tuple(v if math.isfinite(v) else 0.0 for v in vals)
             uv = read_pair(uv_off)
-            if st == 40:
-                uv2 = read_pair(uv_off + 4)
+            # Extra words in 40-byte records are not a proven second UV set.
         return {'pos': pos, 'w': w, 'bi': bi, 'nrm': nrm, 'uv': uv, 'uv2': uv2}
 
     def encode_vertex(self, sid, vi, pos, w, bi, nrm, uv, uv2):
@@ -229,7 +228,7 @@ class GMD:
                 v = int(round(nrm[j] * 127.0)) + 128
                 d[off + 20 + j] = max(0, min(255, v))
         if uv is not None:
-            uv_off = off + (32 if st >= 36 else 28)
+            uv_off = off + self.uv_offset(sid)
             def write_pair(o, values):
                 for j, value in enumerate(values):
                     old = struct.unpack_from('>e', d, o + 2*j)[0]
@@ -238,8 +237,15 @@ class GMD:
                     if abs(value - shown) > 1e-7:
                         struct.pack_into('>e', d, o + 2*j, value)
             write_pair(uv_off, uv)
-            if st == 40 and uv2 is not None:
-                write_pair(uv_off + 4, uv2)
+
+
+    def uv_offset(self, sid):
+        s = self.streams[sid]
+        if s['stride'] == 40:
+            # Same stride, different declarations: 0x1f includes color at
+            # +32, whereas 0x28 has UV at +32 and opaque extra data at +36.
+            return 36 if s['flags'] == 0x1fe0ffc3 else 32
+        return {36: 32, 32: 28, 24: 20}[s['stride']]
 
     def mesh_geometry(self, m):
         """Return (vmap list, faces list of local index triples).

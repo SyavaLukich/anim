@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 1, 2),
+    "version": (0, 1, 3),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -89,6 +89,7 @@ def _make_materials(g, basedir):
         bsdf.location = (-300, 0)
         nt.links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
         slot_names = []
+        diffuse_connected = False
         for s, tex in enumerate(m['tex']):
             if tex < 0 or tex >= len(g.textures):
                 slot_names.append('')
@@ -105,17 +106,15 @@ def _make_materials(g, basedir):
             low = tname.lower()
             if '(n)' in low:
                 img.colorspace_settings.name = 'Non-Color'
-                if 'Normal' in bsdf.inputs:
-                    nmap = nt.nodes.new('ShaderNodeNormalMap')
-                    nmap.location = (-480, -250 * s)
-                    nt.links.new(texn.outputs['Color'], nmap.inputs['Color'])
-                    nt.links.new(nmap.outputs['Normal'], bsdf.inputs['Normal'])
-            elif '(d)' in low:
+                # Packed game normal maps are retained for manual setup;
+                # their channel convention is not confirmed.
+            elif '(d)' in low and not diffuse_connected:
+                diffuse_connected = True
                 nt.links.new(texn.outputs['Color'], bsdf.inputs['Base Color'])
-                nt.links.new(texn.outputs['Alpha'], bsdf.inputs['Alpha'])
+                # Do not interpret game masks as surface transparency.
             elif '(a)' in low:
                 img.colorspace_settings.name = 'Non-Color'
-                nt.links.new(texn.outputs['Color'], bsdf.inputs['Alpha'])
+                # Mask semantics depend on the original game shader.
         mat['gmd_shader'] = g.shaders[m['shader']] if m['shader'] < len(g.shaders) else ''
         mat['gmd_tex_slots'] = ','.join(slot_names)
         mats.append(mat)
@@ -248,7 +247,7 @@ def load_gmd(context, filepath, import_momo=None, rig_mma=None, bake_euler=False
             me.attributes['gmd_w2'].data.foreach_set('value', w2s)
         _set_custom_normals(me, normals)
         # uv layers
-        if stride >= 32:
+        if stride >= 24:
             uvl = me.uv_layers.new(name='UVMap')
             uv2l = me.uv_layers.new(name='UV2') if stride == 40 else None
             for poly in me.polygons:
