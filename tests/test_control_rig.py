@@ -273,6 +273,25 @@ def fixture_test():
     path = 'pose.bones["MCH_leg_l_0"].use_ik_limit_x'
     assert sum(1 for d in ctrl.animation_data.drivers
                if d.data_path == path) == 1  # no stacked duplicate drivers
+    # A twisted IK state (rolled spine solution saved by an older
+    # version) must not become its own reference: Match IK reads the FK
+    # bases and restores the untwisted pose.
+    ctrl['bd_ik_spine'] = 0.0
+    rig.refresh(ctrl)
+    mune_fk = arm.pose.bones['mune_c_n'].matrix.copy()
+    ctrl['bd_ik_spine'] = 1.0
+    mech = ctrl.pose.bones['MCH_spine_1']
+    mech.matrix_basis = mech.matrix_basis @ Matrix.Rotation(
+        1.9, 4, Vector((0, 1, 0)))
+    rig.refresh(ctrl)
+    twisted = max(abs(mune_fk[i][j] - arm.pose.bones['mune_c_n'].matrix[i][j])
+                  for i in range(4) for j in range(4))
+    assert twisted > 0.05, twisted  # the corruption really shows
+    rig.match(ctrl, 'spine', 'IK', key=False)
+    rig.refresh(ctrl)
+    healed = max(abs(mune_fk[i][j] - arm.pose.bones['mune_c_n'].matrix[i][j])
+                 for i in range(4) for j in range(4))
+    assert healed < 0.05 and healed < twisted * 0.25, (twisted, healed)
     rig.remove(arm)
     print('PASS: FK preservation, IK match/convert, planted feet, foot roll, '
           'helpers, bake, save/reopen, removal, rest-pose IK, limit repair',

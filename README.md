@@ -6,6 +6,13 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.8.3:** spine/neck pole side and Match reference fixes — at bind the
+chest sits in front of the waist–neck line, which put the spine pole in
+front and rolled the torso (crossed arms); poles now stay on the
+anatomical side below ~7° of bend. Match IK reads its reference from the
+FK bases (chain blend off), so a twisted IK state saved by an older
+version is no longer its own reference and heals on Match.
+
 **v0.8.2:** IK robustness fixes — near-straight chains take the pole/hinge
 direction from the anatomical fallback instead of sub-degree pose noise
 (knees no longer bend sideways), mechanism bases are set through the rest

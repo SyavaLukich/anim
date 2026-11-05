@@ -36,7 +36,7 @@ LIMIT_PROFILES = {
     'neck':  {'flex': (0.65, 0.55), 'side': (0.70, 0.65), 'twist': (1.00, 0.90)},
 }
 HYPER_EXTENSION = 0.12  # rad of allowed bend past straight, for every hinge
-RIG_VERSION = 'v0.8.2'
+RIG_VERSION = 'v0.8.3'
 # Clavicle/shoulder controls: single-bone drivers for kata_*_n.
 SHOULDERS = {'shoulder_l': 'kata_l_n', 'shoulder_r': 'kata_r_n'}
 
@@ -91,10 +91,15 @@ def _new_bone(data, name, head, tail, parent=None, matrix=None):
 def _pole(a,b,c,size,fallback=(0,0,1)):
     axis = c-a
     bend = b-a-axis*((b-a).dot(axis)/max(axis.length_squared,1e-12))
-    if bend.length < 0.02*axis.length:
-        # Near-straight chain: the measured bend direction is numerical
-        # noise (a fraction of a degree) and would put the pole on a
-        # random side; use the anatomical fallback instead.
+    if bend.length < 0.12*(b-a).length or bend.dot(Vector(fallback)) < 0:
+        # Near-straight chain (a few degrees): the measured bend
+        # direction is numerical noise and would put the pole on a
+        # random side.  A measured bend on the opposite side of the
+        # anatomical one is just as bad: at bind the chest sits slightly
+        # in front of the waist-neck line, which would put the spine
+        # pole in front and roll the whole torso.  Below ~7 degrees the
+        # pole stays on the anatomical side; the goal alone decides the
+        # bend direction.
         bend = Vector(fallback)
         if abs(axis.normalized().dot(bend)) > .9:
             bend = Vector((1,0,0))
@@ -174,7 +179,8 @@ def _apply_limits(ctrl, limb, joints):
     seg1 = joints[1]-joints[0]
     bend = seg1.copy()
     bend -= axis*(bend.dot(axis)/axis.length_squared)
-    if bend.length < 0.02*axis.length:
+    if (bend.length < 0.12*seg1.length
+            or bend.dot(Vector(POLE_FALLBACK[kind])) < 0):
         bend = Vector(POLE_FALLBACK[kind])
         bend -= axis.normalized()*(bend.dot(axis.normalized()))
         if bend.length < 1e-9:
@@ -642,7 +648,7 @@ def _position_ik_controls(ctrl, limb, matrices, key=True):
             joints[1] += pole_dir.normalized() * \
                 (0.008*min(seg1.length, seg2.length))
     hinge = (joints[1]-joints[0]).cross(joints[2]-joints[1])
-    if hinge.length < 0.05*seg1.length*seg2.length:
+    if hinge.length < 0.12*seg1.length*seg2.length:
         # Near-straight: hinge from the (anatomical) pole instead of the
         # noise-dominated joint cross product.
         hinge = (pole.matrix.translation-joints[1]).cross(
@@ -716,8 +722,25 @@ def match(ctrl,limb,direction,key=True,enable=True):
     if key:
         _key_previous_switch(ctrl, limb, direction)
     if direction=='IK':
+        # Read the FK reference with this chain's IK blend off: with it
+        # on, the clones show the current IK result, and matching from
+        # that preserves even a twisted solver state forever.  The FK
+        # bases are the ground truth a repair must return to.
+        ctrl['bd_ik_'+limb]=0.0
+        refresh(ctrl)
         matrices=_joint_matrices(ctrl, limb)
         _position_ik_controls(ctrl, limb, matrices, key=key)
+        # The mechanism is posed against transient solver states; if the
+        # evaluated chain is not yet on the FK reference (rolled or
+        # flipped starting state), pose it once more from the same
+        # reference -- the second pass starts near the solution.
+        refresh(ctrl)
+        names=LIMBS[limb]
+        diff=max(abs(ctrl.pose.bones[n].matrix[i][j]-m[i][j])
+                 for n,m in zip(names,matrices) for i in range(4)
+                 for j in range(4))
+        if diff > 2e-3:
+            _position_ik_controls(ctrl, limb, matrices, key=key)
         # Rigs saved by older versions keep their limit values as data;
         # recalibrating here repairs them without recreating the rig.
         _apply_limits(ctrl, limb, [m.translation for m in matrices])
