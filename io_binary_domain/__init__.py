@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 1, 4),
+    "version": (0, 1, 5),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -30,6 +30,12 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from . import gmd as gmd_mod
 from . import mmo as mmo_mod
+
+# Blender can re-execute the package after an update while retaining old
+# parser submodules in sys.modules. Refresh both pure-Python modules too.
+import importlib
+importlib.reload(gmd_mod)
+importlib.reload(mmo_mod)
 
 AXIS_CONV = mathutils.Matrix.Rotation(math.pi / 2, 3, 'X')  # game Y-up -> Blender Z-up (display only)
 BONE_LEN = 0.05
@@ -176,6 +182,7 @@ def load_gmd(context, filepath, import_momo=None, rig_mma=None, bake_euler=False
     bpy.ops.object.mode_set(mode='OBJECT')
     arm_obj['gmd_source'] = filepath
     arm_obj['gmd_model'] = g.name
+    arm_obj['gmd_uv_decoder'] = 'binary16-declaration-v1'
 
     # ---------------- materials ----------------
     mats = _make_materials(g, basedir)

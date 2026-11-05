@@ -140,3 +140,19 @@ and `UVMap` is selected for editing and rendering. On the naked model, face
 record m009 has U bounds 0.2053–0.7778 and Blender V bounds 0.1890–0.6570.
 A Cycles test render confirms readable face, hair and shirt textures;
 remaining artifacts on the upper arm and some details are not resolved.
+
+## Updating an existing installation (v0.1.5)
+
+The addon now reloads its pure-Python parser submodules when the package is
+reloaded. Previously an update could leave the old `gmd.py` decoder in memory
+while executing new material/UI code. In the supplied broken scene, face
+m009.001 UVs matched the old normalized/interleaved decoder to within 3e-8,
+while material nodes already used explicit UVMap connections.
+
+To repair an existing scene, install the latest addon and run
+`tools/repair_scene_uv.py` in Blender's Text Editor, in Object Mode. Original
+GMD files must still exist at each object's `gmd_source` path. The script
+validates all relevant topology first, restores only UVMap, and does not
+save the scene automatically. Save a backup before running it. Tested on the
+supplied scene in Blender 4.5: 53 UV-bearing objects restored; face UVs match
+the corrected decoder exactly. The original 5.1 file is not overwritten.

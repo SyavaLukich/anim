@@ -20,6 +20,11 @@ import io_binary_domain as iobd  # noqa: E402
 from io_binary_domain import gmd as gmd_mod  # noqa: E402
 from io_binary_domain import mmo as mmo_mod  # noqa: E402
 
+# Simulate Blender retaining a stale parser across addon package reload.
+import importlib
+gmd_mod.GMD.uv_offset = lambda self, sid: -999
+importlib.reload(iobd)
+# uv_offset needs an instance; the declaration assertions below verify reload.
 iobd.register()
 
 GMD_FILES = ['c_awmn_fey.gmd', 'c_awmn_fey_head.gmd', 'c_awmn_fey_last.gmd',
