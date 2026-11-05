@@ -6,6 +6,15 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.8.6:** shoulder-girdle auto-follow (per updated `требования.txt`) —
+in arm IK the clavicle now rises/protracts with the hand (driven
+`MCH_shoulder_*_base`, strength slider "Shoulder assist", manual
+`CTRL_shoulder_*` offset composes on top). The mechanism rides the chest
+so it stays attached when the spine bends; Match IK on an arm also
+matches its clavicle, and Convert keys the clavicles per frame (with a
+second pass compensating the assist) so converted clips stay exact.
+Note: the assist is structural — recreate the rig once to get it.
+
 **v0.8.5:** wrist behaviour in IK — the hand now follows the forearm
 segment (new `MCH_hand_*` frame) instead of keeping the control's world
 orientation, so translating the hand control no longer bends the wrist

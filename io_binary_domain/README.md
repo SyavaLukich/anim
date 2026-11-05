@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.8.5
+# Binary Domain Blender addon — v0.8.6
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -307,6 +307,13 @@ the controls through world-space constraints that can be disabled or removed.
   orientation instead follows the forearm segment, with `CTRL_arm_*`
   rotation applied as an additive wrist offset — translating the hand
   control never bends the wrist by itself.
+- In arm IK the clavicle auto-follows the hand: it rises as the hand
+  goes above the shoulder and protracts on forward reach (strength:
+  the **Shoulder assist** slider; the mechanism rides the chest, and
+  `CTRL_shoulder_*` rotation adds a manual offset on top). Match IK on
+  an arm also matches its clavicle onto the FK pose, and Convert keys
+  the clavicles per frame, so nothing pops. The assist is part of the
+  rig structure — recreate the rig once to get it on older scenes.
 - **Match IK / Match FK** buttons place the controls on the current limb
   pose and key the IK/FK switch at the current frame (with the previous
   state keyed one frame earlier), so switching does not pop. Matching is

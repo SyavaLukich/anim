@@ -36,7 +36,7 @@ LIMIT_PROFILES = {
     'neck':  {'flex': (0.65, 0.55), 'side': (0.70, 0.65), 'twist': (1.00, 0.90)},
 }
 HYPER_EXTENSION = 0.12  # rad of allowed bend past straight, for every hinge
-RIG_VERSION = 'v0.8.5'
+RIG_VERSION = 'v0.8.6'
 # Clavicle/shoulder controls: single-bone drivers for kata_*_n.
 SHOULDERS = {'shoulder_l': 'kata_l_n', 'shoulder_r': 'kata_r_n'}
 
@@ -348,6 +348,7 @@ def create(source, ik_default=False):
     prop(ctrl,'bd_helpers',0.0,description='Approximate twist/bend sharing; not game OPE0')
     for limb in LIMBS: prop(ctrl,'bd_ik_'+limb,0.0,description='0: FK / 1: IK (use Match buttons to avoid jumps)')
     for key in SHOULDERS: prop(ctrl,'bd_'+key,0.0,description='0: FK clip / 1: shoulder (clavicle) control')
+    prop(ctrl,'bd_shoulder_assist',0.35,description='Clavicle auto-follow: shoulder girdle rises/reaches with the arm in IK')
     prop(ctrl,'bd_limits',1.0,description='Respect anatomical joint limits in IK solving')
     size = max(.1, abs(source.data.bones['center_c_n'].head_local.y))
     created_action = None
@@ -426,8 +427,13 @@ def create(source, ik_default=False):
             clavicle = source.data.bones[bone_name]
             _new_bone(data,'CTRL_'+key,clavicle.head_local,
                       clavicle.head_local+Vector((0,size*.1,0)),'CTRL_global')
+            # The mechanism rides the chest (mune) so the clavicle stays
+            # attached when the spine bends; auto-follow is driven onto
+            # the base bone, the manual control rotates the inner bone.
+            _new_bone(data,'MCH_'+key+'_base',clavicle.head_local,
+                      clavicle.tail_local,'mune_c_n',clavicle.matrix_local)
             _new_bone(data,'MCH_'+key,clavicle.head_local,clavicle.tail_local,
-                      'CTRL_'+key,clavicle.matrix_local)
+                      'MCH_'+key+'_base',clavicle.matrix_local)
         # Driver bind frames for optional helper sharing; no evaluated back-reference.
         from . import mmo
         from pathlib import Path
@@ -498,7 +504,74 @@ def create(source, ik_default=False):
                     v=d.variables.new(); v.name='roll'; v.type='SINGLE_PROP'; v.targets[0].id=ctrl
                     v.targets[0].data_path=foot.path_from_id()+'["roll"]'
         for key,bone_name in SHOULDERS.items():
-            _copy(ctrl.pose.bones[bone_name], ctrl, 'MCH_'+key, ctrl, 'bd_'+key)
+            arm_key = 'arm_'+key[-1]
+            follow = _copy(ctrl.pose.bones[bone_name], ctrl, 'MCH_'+key,
+                           ctrl, 'bd_'+key)
+            # The clavicle follows its mechanism whenever the animator
+            # enables it manually OR the arm is in IK (auto-follow).
+            adata = ctrl.animation_data
+            fpath = (f'pose.bones["{bone_name}"].constraints'
+                     f'["{follow.name}"].influence')
+            for fcurve in list(adata.drivers):
+                if fcurve.data_path == fpath:
+                    adata.drivers.remove(fcurve)
+            gate = follow.driver_add('influence').driver
+            gate.type = 'SCRIPTED'
+            gate.expression = 'max(manual, armik)'
+            var = gate.variables.new(); var.name = 'manual'
+            var.type = 'SINGLE_PROP'; var.targets[0].id = ctrl
+            var.targets[0].data_path = f'["bd_{key}"]'
+            var = gate.variables.new(); var.name = 'armik'
+            var.type = 'SINGLE_PROP'; var.targets[0].id = ctrl
+            var.targets[0].data_path = f'["bd_ik_{arm_key}"]'
+            # Manual clavicle offset: rotating CTRL_<key> (its basis
+            # rotation is zeroed by Match) rotates the mechanism bone.
+            mech = ctrl.pose.bones['MCH_'+key]
+            manual = mech.constraints.new('COPY_ROTATION')
+            manual.name = PREFIX+'clavicle manual '+key
+            manual.target = ctrl; manual.subtarget = 'CTRL_'+key
+            manual.target_space = 'LOCAL'; manual.owner_space = 'LOCAL'
+            manual.mix_mode = 'AFTER'; manual.influence = 1.0
+            # Auto-follow drivers on the base bone: clavicle elevation
+            # (local Z) from hand height and protraction (local Y) from
+            # forward reach, scaled by bd_shoulder_assist in arm IK.
+            base = ctrl.pose.bones['MCH_'+key+'_base']
+            base.rotation_mode = 'XYZ'
+            clavicle = source.data.bones[bone_name]
+            sign = 1.0 if key.endswith('_l') else -1.0
+            reach = 0.5*size
+            # World forward offset of the bind wrist vs the clavicle:
+            # protraction is measured from the bind pose, not from zero.
+            bind_forward = (source.data.bones[LIMBS[arm_key][2]].head_local.z
+                            - clavicle.head_local.z)
+            # Elevation/protraction from the hand's world position
+            # relative to the shoulder control (also world): zero while
+            # the hand hangs below the shoulder, as in FK clips, so
+            # matching and clip conversion stay pop-free.
+            for axis_index, expr, htype, stype in (
+                    (2, f'{sign} * armik * assist * 1.2 * min(1.0, max(0.0, '
+                        f'(hand - sho) / {reach:.4f}))', 'LOC_Z', 'LOC_Z'),
+                    (1, f'{-sign} * armik * assist * 0.6 * min(1.0, max(0.0, '
+                        f'((sho - hand) - {bind_forward:.4f}) / {reach:.4f}))',
+                     'LOC_Y', 'LOC_Y')):
+                driven = base.driver_add('rotation_euler', axis_index).driver
+                driven.type = 'SCRIPTED'; driven.expression = expr
+                var = driven.variables.new(); var.name = 'hand'
+                var.type = 'TRANSFORMS'; var.targets[0].id = ctrl
+                var.targets[0].bone_target = 'CTRL_'+arm_key
+                var.targets[0].transform_type = htype
+                var.targets[0].transform_space = 'WORLD_SPACE'
+                var = driven.variables.new(); var.name = 'sho'
+                var.type = 'TRANSFORMS'; var.targets[0].id = ctrl
+                var.targets[0].bone_target = 'CTRL_'+key
+                var.targets[0].transform_type = stype
+                var.targets[0].transform_space = 'WORLD_SPACE'
+                var = driven.variables.new(); var.name = 'armik'
+                var.type = 'SINGLE_PROP'; var.targets[0].id = ctrl
+                var.targets[0].data_path = f'["bd_ik_{arm_key}"]'
+                var = driven.variables.new(); var.name = 'assist'
+                var.type = 'SINGLE_PROP'; var.targets[0].id = ctrl
+                var.targets[0].data_path = '["bd_shoulder_assist"]'
         for name in helper_drivers:
             for i in (0,1):
                 _copy(ctrl.pose.bones[name],ctrl,f'MCH_share_{i}_{name}',ctrl,'bd_helpers',1 if i==0 else .5,rotation_only=True)
@@ -811,12 +884,12 @@ def _settle(ctrl, limb, matrices, key):
     sits on it (Blender's IK is history-dependent, so the frame the OUT
     bones were compensated against can differ from the settled one)."""
     names = LIMBS[limb]
-    for _ in range(3):
+    for _ in range(5):
         refresh(ctrl)
         diff = max(abs(ctrl.pose.bones[n].matrix[i][j]-m[i][j])
                    for n, m in zip(names, matrices)
                    for i in range(4) for j in range(4))
-        if diff <= 2e-3:
+        if diff <= 2e-4:
             break
         _position_ik_controls(ctrl, limb, matrices, key=key)
         _apply_limits(ctrl, limb, [m.translation for m in matrices])
@@ -845,6 +918,13 @@ def match(ctrl,limb,direction,key=True,enable=True):
         # recalibrating here repairs them without recreating the rig.
         _apply_limits(ctrl, limb, [m.translation for m in matrices])
         ctrl['bd_ik_'+limb]=1.0 if enable else 0.0
+        if enable and KINDS[limb] == 'arm':
+            # The clavicle follows its mechanism whenever the arm is in
+            # IK; match it onto the FK pose before the final settle, or
+            # the switch would replace the clip's clavicle motion with
+            # the bind frame.  (Settling afterwards keeps the arm chain
+            # on the FK reference in the true final state.)
+            match_shoulder(ctrl, 'shoulder_'+limb[-1], key_switch=key)
         if enable:
             _settle(ctrl, limb, matrices, key)
             # Healing this chain moved the parent frame of its dependent
@@ -903,8 +983,6 @@ def match_shoulder(ctrl, key, key_switch=True):
     refresh(ctrl)
     target = ctrl.pose.bones[SHOULDERS[key]].matrix.copy()
     control = ctrl.pose.bones['CTRL_'+key]
-    frame = ctrl.pose.bones['MCH_'+key].matrix
-    offset = control.matrix.inverted_safe() @ frame
     if key_switch:
         scene = bpy.context.scene
         action = ctrl.animation_data.action if ctrl.animation_data else None
@@ -913,13 +991,42 @@ def match_shoulder(ctrl, key, key_switch=True):
             ctrl['bd_'+key] = 0.0
             ctrl.keyframe_insert(data_path=f'["bd_{key}"]',
                                  frame=scene.frame_current-1)
-    control.matrix = target @ offset.inverted_safe()
+    # Place the widget on the clavicle; the manual offset stored in its
+    # basis rotation is computed afterwards, against the live base bone
+    # (auto-follow included), so enabling the shoulder never pops.
+    control.matrix = Matrix.LocRotScale(target.translation.copy(),
+                                        target.to_quaternion(),
+                                        Vector((1, 1, 1)))
     for name, value in saved.items():
         ctrl['bd_ik_'+name]=value
     for k, value in saved_sh.items():
         ctrl['bd_'+k]=value
     ctrl['bd_'+key] = 1.0
     refresh(ctrl)
+    base_quat = ctrl.pose.bones['MCH_'+key+'_base'].matrix.to_quaternion()
+    delta = base_quat.inverted() @ target.to_quaternion()
+    loc, _rot, scale = control.matrix_basis.decompose()
+    control.matrix_basis = Matrix.LocRotScale(loc, delta, scale)
+    refresh(ctrl)
+    # The offset is applied by a constraint in a slightly different
+    # frame than it was authored in; close the remaining error with
+    # measured corrections on the clavicle itself, keeping the best.
+    target_quat = target.to_quaternion()
+    best = None
+    for _ in range(4):
+        current = ctrl.pose.bones[SHOULDERS[key]].matrix.to_quaternion()
+        error = current.rotation_difference(target_quat).angle
+        loc, quat, scale = control.matrix_basis.decompose()
+        if best is not None and error > best[0]:
+            control.matrix_basis = Matrix.LocRotScale(loc, best[1], scale)
+            refresh(ctrl)
+            break
+        best = (error, quat.copy())
+        if error < 1e-5:
+            break
+        fix = current.inverted() @ target_quat
+        control.matrix_basis = Matrix.LocRotScale(loc, quat @ fix, scale)
+        refresh(ctrl)
     if key_switch:
         control.rotation_mode = 'QUATERNION'
         for path in ('location', 'rotation_quaternion', 'scale'):
@@ -969,10 +1076,31 @@ def convert_to_ik(ctrl, start, end, limbs=None):
         raise ValueError('Unknown limb: '+', '.join(unknown))
     scene = bpy.context.scene
     old_frame, old_subframe = scene.frame_current, scene.frame_subframe
+    # Conversion must reproduce the FK clip exactly: the clavicle
+    # auto-follow would add its own rotation on top of the clip's.
+    old_assist = ctrl['bd_shoulder_assist'] if 'bd_shoulder_assist' in ctrl else None
+    if old_assist is not None:
+        ctrl['bd_shoulder_assist'] = 0.0
     try:
         for limb in limbs:
             ctrl['bd_ik_'+limb] = 0.0
         refresh(ctrl)
+        # Key the clavicle controls onto the FK kata pose per frame:
+        # in IK the clavicle follows its mechanism, so without keys the
+        # clip's clavicle motion would be replaced by the bind frame.
+        def key_shoulder_pass():
+            for key in SHOULDERS:
+                for frame in range(start, end+1):
+                    scene.frame_set(frame)
+                    match_shoulder(ctrl, key, key_switch=False)
+                    ctl = ctrl.pose.bones['CTRL_'+key]
+                    ctl.rotation_mode = 'QUATERNION'
+                    for path in ('location', 'rotation_quaternion', 'scale'):
+                        ctl.keyframe_insert(data_path=path)
+                ctrl.keyframe_insert(data_path=f'["bd_{key}"]', frame=start)
+                if end > start:
+                    ctrl.keyframe_insert(data_path=f'["bd_{key}"]', frame=end)
+        key_shoulder_pass()
         for limb in limbs:
             names = LIMBS[limb]
             scene.frame_set(start)
@@ -1001,7 +1129,16 @@ def convert_to_ik(ctrl, start, end, limbs=None):
                         if start <= point.co[0] <= end:
                             point.interpolation = 'LINEAR'
         refresh(ctrl)
+        if old_assist is not None:
+            # Re-key the clavicles with the auto-follow back on: the
+            # match delta is computed against the live (assisted) base,
+            # so the converted clip stays exact with assist enabled.
+            ctrl['bd_shoulder_assist'] = old_assist
+            key_shoulder_pass()
+            refresh(ctrl)
     finally:
+        if old_assist is not None:
+            ctrl['bd_shoulder_assist'] = old_assist
         scene.frame_set(old_frame, subframe=old_subframe)
         refresh(ctrl)
 
@@ -1221,6 +1358,7 @@ def draw(layout,obj):
         row.prop(ctrl,'["bd_'+key+'"]',text=key.replace('_',' ').title()+' (clavicle)',slider=True)
         op=row.operator('bdomain.match_shoulder',text='Match')
         op.shoulder=key
+    box.prop(ctrl,'["bd_shoulder_assist"]',text='Shoulder assist (clavicle follows arm)',slider=True)
     box.prop(ctrl,'["bd_limits"]',text='Joint limits (IK only)',slider=True)
     box.label(text='CTRL_pole_* aim knees / elbows / spine / neck')
     for side in ('l','r'):

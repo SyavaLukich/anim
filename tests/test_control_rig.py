@@ -134,7 +134,11 @@ def fixture_test():
     # clavicle/arm root, and switching back restores the pose exactly.
     bpy.context.scene.frame_set(20)
     bpy.context.view_layer.update()
-    assert ctrl['bd_shoulder_l'] == 0.0 and ctrl['bd_shoulder_r'] == 0.0
+    # Conversion leaves the clavicles keyed on (that is how the clip's
+    # clavicle motion survives in IK); switch them off for FK follow.
+    ctrl['bd_shoulder_l'] = 0.0
+    ctrl['bd_shoulder_r'] = 0.0
+    rig.refresh(ctrl)
     base = {pb.name: pb.matrix.copy() for pb in arm.pose.bones}
     rig.match_shoulder(ctrl, 'shoulder_l', key_switch=False)
     rig.refresh(ctrl)
@@ -149,6 +153,26 @@ def fixture_test():
     ctrl['bd_shoulder_l'] = 0.0
     rig.refresh(ctrl)
     assert max_diff(base, {pb.name: pb.matrix.copy() for pb in arm.pose.bones}) < 1e-5
+
+    # Shoulder assist: raising the hand in IK lifts the clavicle with
+    # the arm; with the assist at zero the clavicle stays put.
+    hand = ctrl.pose.bones['CTRL_arm_l']
+    hand_home = hand.matrix.copy()
+    raised = hand_home.copy()
+    raised.translation.y += 0.65
+    raised.translation.z += 0.2
+    hand.matrix = raised
+    rig.refresh(ctrl)
+    kata_on = max_diff({'kata_l_n': base['kata_l_n']},
+                       {'kata_l_n': arm.pose.bones['kata_l_n'].matrix})
+    ctrl['bd_shoulder_assist'] = 0.0
+    rig.refresh(ctrl)
+    kata_off = max_diff({'kata_l_n': base['kata_l_n']},
+                        {'kata_l_n': arm.pose.bones['kata_l_n'].matrix})
+    assert kata_on > kata_off + 0.01, (kata_on, kata_off)
+    ctrl['bd_shoulder_assist'] = 0.35
+    hand.matrix = hand_home
+    rig.refresh(ctrl)
 
     # Joint limits clamp an extreme IK demand (deep knee fold) while
     # segment lengths stay rigid; disabling limits restores full range.
