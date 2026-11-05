@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.2.2
+# Binary Domain Blender addon — v0.2.3
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -190,3 +190,16 @@ Historical diagnostic helpers remain under `tools/` and `tests/`:
 Use a fresh v0.2.0 import or the skin-group repair operator for facial playback.
 
 Additional optional game-data regression: `LD_LIBRARY_PATH=/home/user/xlibs python3 tests/test_momo_catalog.py` checks both large libraries, byte-exact patches of every channel, on-demand selection, save/reopen and the body-rig guard. Fixtures are not distributed.
+
+## File paths (v0.2.3)
+
+**Load MOMO clips** uses Blender's standard file-import helper. Select an
+actual `.mmo` filename, not just `C:\Binary Domain\motion\binaries\`.
+The optional MOMA field takes a full `.mma` filename; leave it blank for
+the bundled face rig. Directories are rejected with a message identifying
+the MOMO/MOMA field before any file is opened. Spaces, matching pasted
+quotes and Blender `//` relative paths are handled. Backslashes are not
+blindly replaced or removed (which would damage Windows/UNC paths).
+Python exception text can show `\\` for a single actual backslash.
+Path checks are covered by `tests/test_input_paths.py` under bpy; native
+Windows GUI/filesystem behavior has not been exercised in this Linux sandbox.

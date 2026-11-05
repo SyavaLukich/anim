@@ -6,6 +6,9 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.2.3:** standard MOMO file selector and explicit file-versus-folder
+validation for MOMO/MOMA paths, including pasted quotes.
+
 **v0.2.2:** visible clip list with a filter and Apply button, on-demand loading
 for every MMO, and explicit cleanup of unused imported Actions (used/NLA
 Actions preserved).

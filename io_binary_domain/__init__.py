@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 2, 2),
+    "version": (0, 2, 3),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -135,6 +135,7 @@ def _make_materials(g, basedir):
 # import
 # ---------------------------------------------------------------------------
 def load_gmd(context, filepath, import_momo=None, rig_mma=None, bake_euler=False):
+    filepath = _input_file_path(filepath, '.gmd', 'GMD model')
     data = open(filepath, 'rb').read()
     g = gmd_mod.GMD(data, filepath)
     basedir = os.path.dirname(filepath)
@@ -507,6 +508,34 @@ def _weights_from_groups(ob, vi, g, m):
 # ---------------------------------------------------------------------------
 # MOMO
 # ---------------------------------------------------------------------------
+def _input_file_path(value, extension, label, default=None):
+    """Resolve a file field, never treating a directory as a selected file.
+
+    Do not replace backslashes: they are real Windows separators (and two
+    leading separators can be a UNC share). Python repr escaping is not a
+    duplicated separator in the actual filename.
+    """
+    text = (value or '').strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+        text = text[1:-1].strip()
+    if not text:
+        text = default or ''
+    if not text:
+        raise GmdExportError('%s: select a %s file, not just its folder' % (label, extension))
+    if text.endswith(('\\', '/')):
+        raise GmdExportError('%s: a folder was supplied; select the full %s file: %s'
+                             % (label, extension, text))
+    path = os.path.normpath(bpy.path.abspath(os.path.expanduser(text)))
+    if os.path.isdir(path):
+        raise GmdExportError('%s: a folder was supplied; select the full %s file: %s'
+                             % (label, extension, path))
+    if os.path.splitext(path)[1].lower() != extension:
+        raise GmdExportError('%s: expected a %s file, got: %s' % (label, extension, path))
+    if not os.path.isfile(path):
+        raise GmdExportError('%s file not found: %s' % (label, path))
+    return path
+
+
 def _default_rig_path():
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, 'rigs', 'f_man.mma')
@@ -709,7 +738,8 @@ def _create_momo_action(arm, clip, rig, path, bases=None):
 def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False, eager=False):
     if arm_obj.get('gmd_skinning_version') != 2:
         raise GmdExportError('Re-import GMD or use Repair old skin groups first')
-    path = bpy.path.abspath(mmo_path)
+    path = _input_file_path(mmo_path, '.mmo', 'MOMO animation')
+    rig_path = _input_file_path(mma_path, '.mma', 'MOMA rig', _default_rig_path())
     data = open(path, 'rb').read()
     # Read clip metadata only. Large libraries must not retain every channel
     # object or create thousands of Actions just to show a searchable list.
@@ -721,7 +751,7 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False, eager=
                              'Body-rig retargeting (including p_gen_tpose in '
                              'p_gen_basic.mmo) is not implemented; this file '
                              'cannot be applied with f_man.mma.' % clips[0].header)
-    rig = mmo_mod.parse_moma(open(mma_path or _default_rig_path(), 'rb').read())
+    rig = mmo_mod.parse_moma(open(rig_path, 'rb').read())
     lazy = not eager
     selected = clips[:1] if lazy else clips
     prepared = []
@@ -842,14 +872,16 @@ class BDOMAIN_OT_preview_momo(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class BDOMAIN_OT_load_momo(bpy.types.Operator):
+class BDOMAIN_OT_load_momo(bpy.types.Operator, ImportHelper):
     """Import constant MOMO expressions as bone-transform Actions"""
     bl_idname = 'bdomain.load_momo'
     bl_label = 'Load MOMO clips'
     bl_options = {'REGISTER', 'UNDO'}
 
-    filepath: StringProperty(subtype='FILE_PATH')
-    rig_mma: StringProperty(subtype='NONE',
+    filename_ext = '.mmo'
+    check_extension = False  # Never turn a directory into 'directory.mmo'.
+    filepath: StringProperty(name='MOMO file (.mmo)', subtype='FILE_PATH')
+    rig_mma: StringProperty(name='Optional MOMA file (.mma)', subtype='NONE',
                             description='MOMA rig with node names (default: bundled f_man.mma)')
     eager: BoolProperty(name='Load all Actions (slow)', default=False,
                         description='Create Actions for every clip instead of loading on selection')
@@ -871,9 +903,11 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator):
         self.report({'INFO'}, '%d clips available; %d Actions created. Select an expression to load it.' % (n, count))
         return {'FINISHED'}
 
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
+    def draw(self, context):
+        self.layout.label(text='Select an .mmo FILE, not just a directory')
+        self.layout.prop(self, 'rig_mma')
+        self.layout.label(text='Leave MOMA blank to use bundled f_man.mma')
+        self.layout.prop(self, 'eager')
 
 
 _momo_enum_cache = {}
