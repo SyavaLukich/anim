@@ -6,6 +6,11 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.8.1:** rest-pose IK fix — perfectly straight bind legs no longer stall
+or flip the pole IK (mechanism bases get a slight pole-side pre-bend, and
+root ball joints no longer guess a flexion side for their limits, which
+could pin a whole chain).
+
 **v0.8.0:** the control rig gains **spine (waist→chest) and neck→head IK**,
 **shoulder/clavicle controls** and **joint limits**: IK chains (arms, legs,
 spine, neck) solve inside anatomical flexion/hyperextension ranges so joints

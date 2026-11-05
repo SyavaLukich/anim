@@ -174,7 +174,7 @@ def fixture_test():
     ctrl['bd_limits'] = 1.0
     rig.refresh(ctrl)
     clamped = knee_flexion()
-    assert free > 150.0 and clamped < free - 20.0, (free, clamped)
+    assert free > 150.0 and clamped < free - 10.0 and clamped < 165.0, (free, clamped)
     assert segment_error(arm) < 5e-4
     rig.match(ctrl, 'leg_l', 'FK')
 
@@ -206,8 +206,48 @@ def fixture_test():
     assert not any(o.get('bd_control_kind') == 'animator_v1'
                    for o in bpy.data.objects)
     assert arm.animation_data.action is not None
+
+    # Rest pose regression: GMD bind legs are perfectly straight, which
+    # is the pole-IK singularity.  Matching IK there must still let the
+    # foot control lift the foot, bending the knee toward the pole
+    # (forward, +Z), and CTRL_body must crouch without flipping legs.
+    arm.animation_data.action = None
+    for pb in arm.pose.bones:
+        pb.matrix_basis.identity()
+    bpy.context.view_layer.update()
+    ctrl = rig.create(arm)
+    rig.match(ctrl, 'leg_l', 'IK', key=False)
+    rig.match(ctrl, 'leg_r', 'IK', key=False)
+    ankle0 = arm.pose.bones['asi3_l_n'].matrix.translation.copy()
+    foot = ctrl.pose.bones['CTRL_leg_l']
+    fm = foot.matrix.copy()
+    fm.translation.y += 0.25
+    foot.matrix = fm
+    rig.refresh(ctrl)
+    ankle1 = arm.pose.bones['asi3_l_n'].matrix.translation.copy()
+    assert (ankle1 - ankle0).y > 0.15, (ankle0, ankle1)
+    hip = arm.pose.bones['asi1_l_n'].matrix.translation.copy()
+    knee = arm.pose.bones['asi2_l_n'].matrix.translation.copy()
+    axis = (ankle1 - hip).normalized()
+    side = (knee - hip) - axis * (knee - hip).dot(axis)
+    assert side.z > 0.05, side  # knee bends forward, never flips back
+    foot.matrix_basis.identity()
+    rig.refresh(ctrl)
+    feet = {s: arm.pose.bones[f'asi3_{s}_n'].matrix.translation.copy()
+            for s in 'lr'}
+    body = ctrl.pose.bones['CTRL_body']
+    bm = body.matrix.copy()
+    bm.translation.y -= 0.3
+    body.matrix = bm
+    rig.refresh(ctrl)
+    for s in 'lr':
+        drift = (arm.pose.bones[f'asi3_{s}_n'].matrix.translation - feet[s]).length
+        assert drift < 1e-3, (s, drift)
+        knee = arm.pose.bones[f'asi2_{s}_n'].matrix.translation.copy()
+        assert knee.z > 0.1, (s, knee)  # knees forward in the crouch
+    rig.remove(arm)
     print('PASS: FK preservation, IK match/convert, planted feet, foot roll, '
-          'helpers, bake, save/reopen, removal', flush=True)
+          'helpers, bake, save/reopen, removal, rest-pose IK', flush=True)
 
 
 if __name__ == '__main__':

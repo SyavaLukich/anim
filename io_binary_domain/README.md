@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.8.0
+# Binary Domain Blender addon — v0.8.1
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -281,6 +281,10 @@ the controls through world-space constraints that can be disabled or removed.
 - **Shoulder/clavicle controls** (`CTRL_shoulder_L/R`, Match Shoulder button)
   offset the `kata_*` clavicle bones on top of either FK or IK arm posing;
   at zero they follow the clip exactly.
+- Mechanism bases are pre-bent slightly toward the pole when the FK
+  chain is (near-)straight, so rest-pose legs leave the pole-IK
+  singularity instead of ignoring the foot control or flipping through
+  the hip when `CTRL_body` crouches.
 - **Joint limits (IK solving)**: each mechanism joint solves inside an
   anatomical range — knees/elbows flex deep but cannot hyperextend or fold
   past ~150°, spine/neck bend is modest, twist is capped. Limits are

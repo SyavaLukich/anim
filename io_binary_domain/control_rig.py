@@ -30,7 +30,7 @@ POLE_FALLBACK = {'leg': (0, 0, 1), 'arm': (0, 0, -1),
                  'spine': (0, 0, -1), 'neck': (0, 0, -1)}
 # Per-kind IK joint limits in radians: (root, mid) flexion / side / twist.
 LIMIT_PROFILES = {
-    'leg':   {'flex': (2.2, 2.62), 'side': (1.20, 0.90), 'twist': (1.40, 1.20)},
+    'leg':   {'flex': (2.2, 2.45), 'side': (1.20, 0.90), 'twist': (1.40, 1.20)},
     'arm':   {'flex': (2.6, 2.62), 'side': (1.40, 1.10), 'twist': (1.60, 1.40)},
     'spine': {'flex': (0.55, 0.55), 'side': (0.65, 0.65), 'twist': (0.90, 0.90)},
     'neck':  {'flex': (0.65, 0.55), 'side': (0.70, 0.65), 'twist': (1.00, 0.90)},
@@ -231,7 +231,15 @@ def _apply_limits(ctrl, limb, joints):
 
             def param(angle, k=k):
                 return angle if k == 1 else math.sin(angle/2)
-            if sign > 0:
+            if k == hinge and i == 0:
+                # Root joints (hip/shoulder/spine base) are ball joints:
+                # at a straight creation pose the flexion side cannot be
+                # measured reliably, and guessing it pins the whole chain
+                # (a leg that cannot fold).  Give roots the flexion
+                # radius on both sides; mid joints keep the tight
+                # hyperextension side.
+                low, high = -param(flex_ang), param(flex_ang)
+            elif sign > 0:
                 low, high = -param(opp_ang), param(flex_ang)
             elif sign < 0:
                 low, high = -param(flex_ang), param(opp_ang)
@@ -572,7 +580,8 @@ def _position_ik_controls(ctrl, limb, matrices, key=True):
     pole = ctrl.pose.bones['CTRL_pole_'+limb]
     pole_matrix = pole.matrix.copy()
     size = max(.1, abs(ctrl.data.bones['center_c_n'].head_local.y))
-    pole_matrix.translation = _pole(*(m.translation for m in matrices), size*.5)
+    pole_matrix.translation = _pole(*(m.translation for m in matrices),
+                                    size*.5, POLE_FALLBACK[KINDS[limb]])
     pole.matrix = pole_matrix
     refresh(ctrl)
     # GMD bind chains are perfectly straight, which is a singularity for
@@ -580,6 +589,25 @@ def _position_ik_controls(ctrl, limb, matrices, key=True):
     # segments onto the FK solution first, breaking the singularity on the
     # correct (pole) side; the live solver starts from this basis.
     joints = [m.translation for m in matrices]
+    # A perfectly straight FK chain (a rest-pose leg) leaves pole-target
+    # IK at its singularity: the solver then ignores closer goals or
+    # flips the chain through the root.  Bend the mechanism's starting
+    # bases slightly toward the pole.  With the goal on the FK endpoint
+    # the solver still settles on the exact FK pose, but it keeps a bent
+    # initial guess, so later goal moves bend on the pole side.
+    seg1 = joints[1]-joints[0]
+    seg2 = joints[2]-joints[1]
+    if (seg1.length > 1e-9 and seg2.length > 1e-9
+            and seg1.angle(seg2) < 0.03):
+        pole_dir = pole.matrix.translation-joints[1]
+        axis = joints[2]-joints[0]
+        pole_dir -= axis*(pole_dir.dot(axis)/axis.length_squared)
+        if pole_dir.length < 1e-6:
+            pole_dir = Vector(POLE_FALLBACK[KINDS[limb]])
+            pole_dir -= axis.normalized()*pole_dir.dot(axis.normalized())
+        if pole_dir.length > 1e-9:
+            joints[1] += pole_dir.normalized() * \
+                (0.008*min(seg1.length, seg2.length))
     hinge = (joints[1]-joints[0]).cross(joints[2]-joints[1])
     if hinge.length < 1e-6:
         hinge = (joints[2]-joints[0]).cross(
