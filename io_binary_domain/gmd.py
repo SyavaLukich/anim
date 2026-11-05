@@ -10,7 +10,7 @@ Structure (all integers big-endian):
      0 skeleton   1 helper-bones   2 meshes   3 materials   4 colors
      5 matrices   6 streams        7 vertex data           8 texture names
      9 shaders   10 bone names    11 index buffer (u16)   12 chunk12
-    13 bone palette (u8 slot->bone)  14 mat params        15 chunk15
+    13 bone palette (count-prefixed u8 slot->bone)  14 mat params        15 chunk15
     16 mat params2
   Skeleton: root record (0x70B) @0x100, 'HSMH' 16B, 214*0x80 records.
      record: [0]id [1]first_child [2]next_sibling [3]parent [6]name_idx
@@ -26,7 +26,7 @@ Structure (all integers big-endian):
      normals are biased bytes: n = (b - 128) / 127
      uv: IEEE 754 binary16 pairs
      weights: u8 (0..255, sum usually 255), bone index byte is LOCAL:
-     bone_id = palette13[pal_base + byte]
+     palette13[pal_base] is count; bone_id = palette13[pal_base + 1 + byte]
 """
 import struct
 import math
@@ -267,7 +267,12 @@ class GMD:
         return vmap, faces
 
     def palette_bones(self, m):
-        return [self.palette[m.pal_base + i] for i in range(m.pal_size)]
+        if not m.pal_size:
+            return []
+        if (m.pal_base + 1 + m.pal_size > len(self.palette) or
+                self.palette[m.pal_base] != m.pal_size):
+            raise ValueError('invalid counted bone palette for mesh %d' % m.idx)
+        return [self.palette[m.pal_base + 1 + i] for i in range(m.pal_size)]
 
 
 # ---------------- helpers ----------------

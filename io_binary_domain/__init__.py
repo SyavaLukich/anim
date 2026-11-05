@@ -6,13 +6,13 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
   and vertex streams are overwritten, so an untouched import exports
   byte-identical to the source.
 - Topology (vertices/faces/materials) is read-only in this version.
-- MOMO face-animation clips are imported as Actions; per-node raw track
-  values are kept in pose-bone custom properties gmd_c0..gmd_c2 (0..1023).
+- MOMO constant expressions are decoded into position/quaternion bone Actions.
+  Exact channel words are retained as Action metadata; preview timing is generated.
 """
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 1, 7),
+    "version": (0, 2, 0),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -25,7 +25,7 @@ import math
 import mathutils
 import os
 import struct
-from bpy.props import (StringProperty, BoolProperty, IntProperty)
+from bpy.props import (StringProperty, BoolProperty, IntProperty, EnumProperty)
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from . import gmd as gmd_mod
@@ -182,6 +182,7 @@ def load_gmd(context, filepath, import_momo=None, rig_mma=None, bake_euler=False
     bpy.ops.object.mode_set(mode='OBJECT')
     arm_obj['gmd_source'] = filepath
     arm_obj['gmd_model'] = g.name
+    arm_obj['gmd_skinning_version'] = 2
     arm_obj['gmd_uv_decoder'] = 'binary16-declaration-v1'
 
     # ---------------- materials ----------------
@@ -280,7 +281,7 @@ def load_gmd(context, filepath, import_momo=None, rig_mma=None, bake_euler=False
             for j in range(4):
                 if w[j] == 0:
                     continue
-                bone_id = g.palette[m.pal_base + bi[j]] if bi[j] < m.pal_size else 0
+                bone_id = pal[bi[j]] if bi[j] < len(pal) else 0
                 if bone_id >= len(g.bones):
                     continue
                 bn = g.bones[bone_id].name
@@ -492,7 +493,7 @@ def _weights_from_groups(ob, vi, g, m):
     for j, (bone_id, w) in enumerate(entries):
         slot = None
         for k in range(m.pal_size):
-            if g.palette[m.pal_base + k] == bone_id:
+            if g.palette_bones(m)[k] == bone_id:
                 slot = k
                 break
         if slot is None:
@@ -511,53 +512,269 @@ def _default_rig_path():
     return os.path.join(here, 'rigs', 'f_man.mma')
 
 
+def repair_gmd_skin_groups(context, arm):
+    """Explicit migration of old imports, restoring ORIGINAL source weights.
+
+    Validate all records/topology before modifying groups. UVs, materials,
+    mesh coordinates, object transforms and Actions are not touched.
+    """
+    source = bpy.path.abspath(arm.get('gmd_source', ''))
+    if not source or not os.path.isfile(source):
+        raise GmdExportError('original GMD not found: %s' % source)
+    g = gmd_mod.GMD(open(source, 'rb').read())
+    objects = [ob for ob in context.scene.objects
+               if ob.type == 'MESH' and ob.parent == arm and 'gmd_mesh' in ob]
+    if (len(objects) != len(g.meshes) or
+            {ob['gmd_mesh'] for ob in objects} != set(range(len(g.meshes)))):
+        raise GmdExportError('imported mesh records are missing or duplicated')
+    prepared = []
+    for ob in objects:
+        m = g.meshes[ob['gmd_mesh']]
+        vm, faces = g.mesh_geometry(m)
+        order = list(dict.fromkeys(vm))
+        if (len(ob.data.vertices) != len(order) or
+                [tuple(p.vertices) for p in ob.data.polygons] != faces):
+            raise GmdExportError('mesh topology differs from source: %s' % ob.name)
+        pal = g.palette_bones(m)
+        groups = {}
+        for vi, v in enumerate(order):
+            dv = g.decode_vertex(m.stream, v)
+            weights = {}
+            for w, slot in zip(dv['w'], dv['bi']):
+                if w and slot < len(pal):
+                    name = g.bones[pal[slot]].name
+                    weights[name] = weights.get(name, 0) + w
+            for name, weight in weights.items():
+                groups.setdefault(name, {}).setdefault(weight, []).append(vi)
+        prepared.append((ob, groups))
+    bone_names = {b.name for b in g.bones}
+    for ob, groups in prepared:
+        for vg in list(ob.vertex_groups):
+            if vg.name in bone_names:
+                ob.vertex_groups.remove(vg)
+        for name in groups:
+            if ob.vertex_groups.get(name) is None:
+                ob.vertex_groups.new(name=name)
+        for name, buckets in groups.items():
+            for weight, indices in buckets.items():
+                ob.vertex_groups[name].add(indices, weight / 255.0, 'REPLACE')
+    arm['gmd_skinning_version'] = 2
+    context.view_layer.update()
+    return len(objects)
+
+
+class BDOMAIN_OT_repair_skin(bpy.types.Operator):
+    """Restore original GMD bone weights with the corrected counted palette; replaces bone-group edits"""
+    bl_idname = 'bdomain.repair_skin'
+    bl_label = 'Repair old skin groups'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        self.layout.label(text='Restore original bone weights from the GMD?')
+        self.layout.label(text='Any bone-weight edits will be replaced.', icon='ERROR')
+        self.layout.label(text='UVs, materials and mesh coordinates are kept.')
+
+    def execute(self, context):
+        ob = context.object
+        if ob is None or ob.type != 'ARMATURE' or ob.mode != 'OBJECT':
+            self.report({'ERROR'}, 'select an imported armature in Object Mode')
+            return {'CANCELLED'}
+        try:
+            n = repair_gmd_skin_groups(context, ob)
+        except Exception as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        self.report({'INFO'}, 'Restored original skin groups on %d meshes; now reload MOMO' % n)
+        return {'FINISHED'}
+
+
+def _expression_bases(arm_obj, clip, nodes, parents, scale):
+    """Retarget the hierarchical position/quaternion channels to GMD bones.
+
+    Keep the model's head anchor/rest orientations; source positions are in
+    face-space game axes, while Blender matrix_basis is parent-relative.
+    """
+    values = mmo_mod.pose_nodes(clip)
+    if len(values) != len(nodes):
+        raise GmdExportError('MOMO/rig node count mismatch')
+    root = arm_obj.data.bones.get(nodes[0])
+    if root is None:
+        raise GmdExportError('face root %s is missing from the armature' % nodes[0])
+    if len(parents) != len(nodes) or parents[0] != -1:
+        raise GmdExportError('MOMA hierarchy is missing or unsupported')
+    targets = {root.name: root.matrix_local.copy()}
+    source_world = [mathutils.Matrix.Identity(4)]
+    for ni, (name, (position, xyzw)) in enumerate(zip(nodes[1:], values[1:]), 1):
+        q = mathutils.Quaternion((xyzw[3], *xyzw[:3]))
+        if q.magnitude < 1e-10:
+            raise GmdExportError('zero MOMO quaternion for %s' % name)
+        q.normalize()
+        local = q.to_matrix().to_4x4()
+        local.translation = mathutils.Vector(position) * scale
+        parent_index = parents[ni]
+        if parent_index < 0 or parent_index >= ni:
+            raise GmdExportError('unsupported MOMA parent index')
+        world = source_world[parent_index] @ local
+        source_world.append(world)
+        bone = arm_obj.data.bones.get(name)
+        if bone is None:
+            continue
+        target = (world.to_3x3() @ bone.matrix_local.to_3x3()).to_4x4()
+        target.translation = root.matrix_local.translation + world.translation
+        targets[name] = target
+    bases = {}
+    for name, target in targets.items():
+        bone = arm_obj.data.bones[name]
+        if bone.parent:
+            bases[name] = bone.convert_local_to_pose(
+                target, bone.matrix_local,
+                parent_matrix=targets.get(bone.parent.name, bone.parent.matrix_local),
+                parent_matrix_local=bone.parent.matrix_local, invert=True)
+        else:
+            bases[name] = bone.convert_local_to_pose(
+                target, bone.matrix_local, invert=True)
+    return bases
+
+
+def _assign_momo_action(arm, action):
+    if arm.animation_data is None:
+        arm.animation_data_create()
+    arm.animation_data.action = action
+    # Explicitly assign a slot for Blender 4.4+ layered Actions.
+    if hasattr(action, 'slots') and len(action.slots):
+        arm.animation_data.action_slot = action.slots[0]
+
+
+def _key_momo_basis(pb, basis, frame):
+    pb.rotation_mode = 'QUATERNION'
+    pb.matrix_basis = basis
+    pb.keyframe_insert(data_path='location', frame=frame)
+    pb.keyframe_insert(data_path='rotation_quaternion', frame=frame)
+    pb.keyframe_insert(data_path='scale', frame=frame)
+
+
 def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
+    # bake_euler remains an API compatibility argument only. Euler guessing
+    # is intentionally removed: the decoded source quaternion is used instead.
+    if arm_obj.get('gmd_skinning_version') != 2:
+        raise GmdExportError('Re-import the GMD with addon v0.2.0 first: older '
+                             'imports have incorrectly shifted skin groups; or use Repair old skin groups')
     data = open(mmo_path, 'rb').read()
     clips = mmo_mod.parse_momo(data)
-    if not mma_path:
-        mma_path = _default_rig_path()
-    rig = mmo_mod.parse_moma(open(mma_path, 'rb').read())
+    if not clips:
+        raise GmdExportError('MOMO contains no supported expression clips')
+    rig = mmo_mod.parse_moma(open(mma_path or _default_rig_path(), 'rb').read())
     nodes = rig['nodes']
     if not nodes:
-        raise GmdExportError('no node names found in rig %s' % mma_path)
-    pose = arm_obj.pose
-    missing = [n for n in nodes if n not in pose.bones]
-    if arm_obj.animation_data is None:
-        arm_obj.animation_data_create()
+        raise GmdExportError('no node names found in MOMA rig')
+    root = arm_obj.data.bones.get(nodes[0])
+    if root is None:
+        raise GmdExportError('face root %s is missing' % nodes[0])
+    # Fey variants are uniformly shorter than the source expression rig.
+    # Use head-anchor height for a deterministic, recorded retarget scale;
+    # this is retargeting, NOT part of the verified binary scalar decoder.
+    source_height = mmo_mod.pose_nodes(clips[0])[0][0][1]
+    scale = root.head_local.y / source_height if abs(source_height) > 1e-8 else 1.0
+    if not math.isfinite(scale) or scale <= 0:
+        raise GmdExportError('cannot determine MOMO retarget scale')
+    # Validate every clip before creating any Actions.
+    prepared = [(c, _expression_bases(arm_obj, c, nodes, rig['parents'], scale)) for c in clips]
+    if arm_obj.animation_data and arm_obj.animation_data.action:
+        arm_obj.animation_data.action.use_fake_user = True
     prefix = os.path.splitext(os.path.basename(mmo_path))[0]
-    maxf = 1
-    for c in clips:
+    action_map = {}
+    first_action = None
+    for c, bases in prepared:
         act = bpy.data.actions.new('%s__%s' % (prefix, c.name))
         act.use_fake_user = True
         act['gmd_raw_momo'] = True
-        prev = arm_obj.animation_data.action
-        arm_obj.animation_data.action = act
-        maxf = max(maxf, c.frames)
-        for ni, node in enumerate(nodes):
-            pb = pose.bones.get(node)
+        act['gmd_expression'] = c.name
+        act['gmd_momo_nodes'] = json.dumps(nodes)
+        act['gmd_momo_scale'] = scale
+        # Exact words retained, including quantization divisors/unused bits.
+        act['gmd_momo_raw_words'] = json.dumps([list(t.words) for t in c.tracks])
+        act['gmd_source_frames'] = c.frames
+        act['gmd_momo_kind'] = 'constant_expression'
+        _assign_momo_action(arm_obj, act)
+        for name, basis in bases.items():
+            _key_momo_basis(arm_obj.pose.bones[name], basis, 1)
+        for ni, name in enumerate(nodes):
+            pb = arm_obj.pose.bones.get(name)
             if pb is None:
                 continue
-            base = 1 + ni * 3
-            vals = [c.tracks[base + k].value for k in range(3)]
             for k in range(3):
-                pb['gmd_c%d' % k] = vals[k]
+                # Decoded position components; exact quantized words are on Action.
+                pb['gmd_c%d' % k] = c.tracks[ni * 4 + k].value
                 pb.keyframe_insert(data_path='["gmd_c%d"]' % k, frame=1)
-            if bake_euler:
-                e = [(v / 1024.0 * 360.0 - 180.0) * math.pi / 180.0 for v in vals]
-                pb.rotation_mode = 'XYZ'
-                pb.rotation_euler = e
-                pb.keyframe_insert(data_path='rotation_euler', frame=1)
         act.frame_range = (1, max(1, c.frames))
-        arm_obj.animation_data.action = prev
-    arm_obj['gmd_momo_mode'] = 'experimental_euler' if bake_euler else 'raw_only'
+        action_map[c.name] = act.name
+        if first_action is None:
+            first_action = act
     arm_obj['gmd_momo'] = mmo_path
+    arm_obj['gmd_momo_mode'] = 'decoded_constant_expressions'
+    arm_obj['gmd_momo_scale'] = scale
     arm_obj['gmd_clips'] = json.dumps([c.name for c in clips])
-    bpy.context.scene.frame_end = max(1, maxf)
+    arm_obj['gmd_clip_actions'] = json.dumps(action_map)
+    _assign_momo_action(arm_obj, first_action)
+    bpy.context.scene.frame_start = 1
+    bpy.context.scene.frame_end = max(1, max(c.frames for c in clips))
+    bpy.context.scene.frame_set(1)
+    bpy.context.view_layer.update()
     return len(clips)
 
 
+def preview_momo_expression(context, arm):
+    """Create an explicitly synthetic rest -> expression -> rest blend."""
+    source = arm.animation_data.action if arm.animation_data else None
+    if source is None or source.get('gmd_momo_kind') != 'constant_expression':
+        raise GmdExportError('select a decoded MOMO expression first')
+    nodes = json.loads(source['gmd_momo_nodes'])
+    _assign_momo_action(arm, source)
+    context.scene.frame_set(1)
+    context.view_layer.update()
+    target = {name: arm.pose.bones[name].matrix_basis.copy()
+              for name in nodes if name in arm.pose.bones}
+    act = bpy.data.actions.new(source.name + '__preview_blend')
+    act.use_fake_user = True
+    act['gmd_momo_kind'] = 'generated_preview'
+    act['gmd_source_expression'] = source.name
+    _assign_momo_action(arm, act)
+    for frame, strength in ((1, 0.0), (16, 1.0), (31, 0.0)):
+        for name, basis in target.items():
+            _key_momo_basis(arm.pose.bones[name],
+                            basis if strength else mathutils.Matrix.Identity(4), frame)
+    act.frame_range = (1, 31)
+    context.scene.frame_start, context.scene.frame_end = 1, 31
+    context.scene.frame_set(1)
+    context.view_layer.update()
+    return act
+
+
+class BDOMAIN_OT_preview_momo(bpy.types.Operator):
+    """Generate a preview blend; timing is not from the source MOMO"""
+    bl_idname = 'bdomain.preview_momo'
+    bl_label = 'Preview expression blend'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        ob = context.object
+        if ob is None or ob.type != 'ARMATURE':
+            self.report({'ERROR'}, 'select an imported GMD armature')
+            return {'CANCELLED'}
+        try:
+            preview_momo_expression(context, ob)
+        except GmdExportError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        self.report({'INFO'}, 'Generated preview on frames 1-31; press Play')
+        return {'FINISHED'}
+
+
 class BDOMAIN_OT_load_momo(bpy.types.Operator):
-    """Import a MOMO face-animation file as Actions on the selected armature"""
+    """Import constant MOMO expressions as bone-transform Actions"""
     bl_idname = 'bdomain.load_momo'
     bl_label = 'Load MOMO clips'
     bl_options = {'REGISTER', 'UNDO'}
@@ -565,9 +782,7 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator):
     filepath: StringProperty(subtype='FILE_PATH')
     rig_mma: StringProperty(subtype='NONE',
                             description='MOMA rig with node names (default: bundled f_man.mma)')
-    bake_euler: BoolProperty(
-        name='Experimental Euler bake', default=False,
-        description='Also keyframe rotation_euler from raw values (semantics unconfirmed)')
+    bake_euler: BoolProperty(default=False, options={'HIDDEN'})
     filter_glob: StringProperty(default='*.mmo', options={'HIDDEN'})
 
     def execute(self, context):
@@ -581,7 +796,7 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
-        self.report({'WARNING'}, 'Imported %d raw MOMO clips; visible facial animation is not implemented' % n)
+        self.report({'INFO'}, 'Imported %d decoded expression poses; use Preview expression blend for motion' % n)
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -589,38 +804,53 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
 
-class BDOMAIN_OT_apply_clip(bpy.types.Operator):
-    """Set the armature action to a MOMO clip"""
-    bl_idname = 'bdomain.apply_clip'
-    bl_label = 'Apply MOMO clip'
-    bl_options = {'REGISTER', 'UNDO'}
+_momo_enum_cache = {}
 
-    name: StringProperty()
+
+def _momo_clip_items(self, context):
+    global _momo_enum_cache
+    ob = context.object
+    if ob is None or ob.type != 'ARMATURE':
+        return []
+    names = tuple(json.loads(ob.get('gmd_clips', '[]')))
+    if names not in _momo_enum_cache:
+        _momo_enum_cache[names] = [(n, n, 'Apply decoded expression ' + n) for n in names]
+    return _momo_enum_cache[names]
+
+
+class BDOMAIN_OT_apply_clip(bpy.types.Operator):
+    """Apply a decoded static expression pose to the armature"""
+    bl_idname = 'bdomain.apply_clip'
+    bl_label = 'Apply MOMO expression'
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_property = 'name'
+
+    name: EnumProperty(items=_momo_clip_items)
 
     def execute(self, context):
         ob = context.object
-        act = bpy.data.actions.get('%s__%s' % (
-            os.path.splitext(os.path.basename(ob.get('gmd_momo', '')))[0],
-            self.name))
-        if act is None:
-            self.report({'ERROR'}, 'action not found')
+        if ob is None or ob.type != 'ARMATURE':
+            self.report({'ERROR'}, 'select an imported GMD armature')
             return {'CANCELLED'}
-        if ob.animation_data is None:
-            ob.animation_data_create()
-        ob.animation_data.action = act
+        mapping = json.loads(ob.get('gmd_clip_actions', '{}'))
+        action_name = mapping.get(self.name)
+        if not action_name:
+            self.report({'ERROR'}, 'reload MOMO with v0.2.0 to decode expressions')
+            return {'CANCELLED'}
+        act = bpy.data.actions.get(action_name)
+        if act is None:
+            self.report({'ERROR'}, 'expression Action not found; reload MOMO')
+            return {'CANCELLED'}
+        _assign_momo_action(ob, act)
+        context.scene.frame_start = 1
+        context.scene.frame_end = max(1, int(act.frame_range[1]))
         context.scene.frame_set(1)
+        context.view_layer.update()
         return {'FINISHED'}
 
     def invoke(self, context, event):
         context.window_manager.invoke_search_popup(self)
         return {'FINISHED'}
-
-    def draw(self, context):
-        self.layout.prop(self, 'name')
-
-    @classmethod
-    def description(cls, context, properties):
-        return 'Apply clip %s' % properties.name
 
 
 # ---------------------------------------------------------------------------
@@ -640,14 +870,13 @@ class BDOMAIN_OT_import_gmd(bpy.types.Operator, ImportHelper):
     rig_mma: StringProperty(
         name='MOMA rig path (paste)', subtype='NONE',
         description='Rig with node names (default: bundled f_man.mma)')
-    bake_euler: BoolProperty(name='Experimental Euler bake', default=False)
+    bake_euler: BoolProperty(default=False, options={'HIDDEN'})
 
     def draw(self, context):
         layout = self.layout
         layout.label(text='Optional paths: paste full file paths')
         layout.prop(self, 'mmo_path')
         layout.prop(self, 'rig_mma')
-        layout.prop(self, 'bake_euler')
         layout.separator()
         layout.label(text='Or load MOMO after model import:')
         layout.label(text='N-panel > Binary Domain > Load MOMO clips')
@@ -701,13 +930,23 @@ class BDOMAIN_PT_panel(bpy.types.Panel):
     def draw(self, context):
         lay = self.layout
         ob = context.object
+        if ob and ob.type == 'ARMATURE' and ob.get('gmd_source') and ob.get('gmd_skinning_version') != 2:
+            lay.label(text='Old skin groups need repair', icon='ERROR')
+            lay.operator('bdomain.repair_skin')
+            lay.label(text='Restores original bone weights')
+            lay.label(text='Or re-import the GMD')
+            return
         if ob and ob.type == 'ARMATURE' and ob.get('gmd_clips'):
             lay.operator('bdomain.load_momo')
             lay.operator('bdomain.apply_clip')
             box = lay.box()
             box.label(text='%d clips' % len(json.loads(ob['gmd_clips'])))
-            box.label(text='Raw MOMO parameters only', icon='INFO')
-            box.label(text='No decoded facial motion yet')
+            if ob.get('gmd_momo_mode') == 'decoded_constant_expressions':
+                box.label(text='Decoded expression poses', icon='INFO')
+                box.operator('bdomain.preview_momo')
+                box.label(text='Preview timing is generated')
+            else:
+                box.label(text='Old raw import: reload MOMO', icon='ERROR')
         else:
             if ob and ob.type == 'ARMATURE' and ob.get('gmd_source'):
                 lay.operator('bdomain.load_momo')
@@ -724,7 +963,7 @@ def menu_export(self, context):
 
 
 classes = (BDOMAIN_OT_import_gmd, BDOMAIN_OT_export_gmd, BDOMAIN_OT_load_momo,
-           BDOMAIN_OT_apply_clip, BDOMAIN_PT_panel)
+           BDOMAIN_OT_apply_clip, BDOMAIN_OT_preview_momo, BDOMAIN_OT_repair_skin, BDOMAIN_PT_panel)
 
 
 def register():
