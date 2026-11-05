@@ -63,6 +63,11 @@ for f in GMD_FILES:
     bpy.context.view_layer.objects.active = arm
     n_mesh = len([o for o in bpy.data.objects if o.type == 'MESH'])
     n_bones = len(arm.data.bones)
+    bpy.context.view_layer.update()
+    for ob in bpy.data.objects:
+        if ob.type == 'MESH':
+            assert max(abs(ob.matrix_world[i][j] - arm.matrix_world[i][j])
+                       for i in range(4) for j in range(4)) < 1e-6, 'Double axis conversion'
     out = os.path.join(OUT, f)
     bpy.ops.export_scene.gmd(filepath=out)
     ok = bytecmp(os.path.abspath(f), out, f)

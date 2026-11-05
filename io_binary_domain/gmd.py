@@ -24,7 +24,7 @@ Structure (all integers big-endian):
   Vertex strides: 40 (pos3f w4 bi4 n4 tan4 FFFFFFFF uv2 uv2ch)
                   36 (no uv2ch)  32 (pos3f w4 bi4 n4 col4 uv2)  20 (pos w bi)
      normals are biased bytes: n = (b - 128) / 127
-     uv: u16 / 65535
+     uv: IEEE 754 binary16 pairs
      weights: u8 (0..255, sum usually 255), bone index byte is LOCAL:
      bone_id = palette13[pal_base + byte]
 """
@@ -206,16 +206,14 @@ class GMD:
             nrm = tuple((d[off + 20 + j] - 128) / 127.0 for j in range(3))
         uv = None
         uv2 = None
-        if st == 40:
-            u0, u1, v0, v1 = struct.unpack_from('>4H', d, off + 32)
-            uv = (u0 / 65535.0, v0 / 65535.0)
-            uv2 = (u1 / 65535.0, v1 / 65535.0)
-        elif st == 36:
-            u0, v0 = struct.unpack_from('>2H', d, off + 32)
-            uv = (u0 / 65535.0, v0 / 65535.0)
-        elif st == 32:
-            u0, v0 = struct.unpack_from('>2H', d, off + 28)
-            uv = (u0 / 65535.0, v0 / 65535.0)
+        if st >= 32:
+            uv_off = off + (32 if st >= 36 else 28)
+            def read_pair(o):
+                vals = struct.unpack_from('>2e', d, o)
+                return tuple(v if math.isfinite(v) else 0.0 for v in vals)
+            uv = read_pair(uv_off)
+            if st == 40:
+                uv2 = read_pair(uv_off + 4)
         return {'pos': pos, 'w': w, 'bi': bi, 'nrm': nrm, 'uv': uv, 'uv2': uv2}
 
     def encode_vertex(self, sid, vi, pos, w, bi, nrm, uv, uv2):
@@ -231,16 +229,17 @@ class GMD:
                 v = int(round(nrm[j] * 127.0)) + 128
                 d[off + 20 + j] = max(0, min(255, v))
         if uv is not None:
-            u = int(round(uv[0] * 65535.0)) & 0xFFFF
-            v = int(round(uv[1] * 65535.0)) & 0xFFFF
-            if st == 40:
-                u2 = int(round(uv2[0] * 65535.0)) & 0xFFFF
-                v2 = int(round(uv2[1] * 65535.0)) & 0xFFFF
-                struct.pack_into('>4H', d, off + 32, u, u2, v, v2)
-            elif st == 36:
-                struct.pack_into('>2H', d, off + 32, u, v)
-            elif st == 32:
-                struct.pack_into('>2H', d, off + 28, u, v)
+            uv_off = off + (32 if st >= 36 else 28)
+            def write_pair(o, values):
+                for j, value in enumerate(values):
+                    old = struct.unpack_from('>e', d, o + 2*j)[0]
+                    # Preserve signed zero and opaque non-finite sentinels.
+                    shown = old if math.isfinite(old) else 0.0
+                    if abs(value - shown) > 1e-7:
+                        struct.pack_into('>e', d, o + 2*j, value)
+            write_pair(uv_off, uv)
+            if st == 40 and uv2 is not None:
+                write_pair(uv_off + 4, uv2)
 
     def mesh_geometry(self, m):
         """Return (vmap list, faces list of local index triples).

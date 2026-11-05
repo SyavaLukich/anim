@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 1, 0),
+    "version": (0, 1, 1),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -105,7 +105,7 @@ def _make_materials(g, basedir):
             low = tname.lower()
             if '(n)' in low:
                 img.colorspace_settings.name = 'Non-Color'
-                if 'Normal Map' in bsdf.inputs:
+                if 'Normal' in bsdf.inputs:
                     nmap = nt.nodes.new('ShaderNodeNormalMap')
                     nmap.location = (-480, -250 * s)
                     nt.links.new(texn.outputs['Color'], nmap.inputs['Color'])
@@ -194,7 +194,6 @@ def load_gmd(context, filepath, import_momo=None, rig_mma=None, bake_euler=False
         me.from_pydata(verts, [], [tuple(f) for f in faces])
         me.update()
         ob = bpy.data.objects.new(me.name, me)
-        ob.rotation_euler = AXIS_CONV.to_euler()
         col.objects.link(ob)
         ob.parent = arm_obj
         mod = ob.modifiers.new('Armature', 'ARMATURE')

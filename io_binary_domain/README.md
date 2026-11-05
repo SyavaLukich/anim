@@ -9,6 +9,11 @@ Tested against the Fey character pack: `c_awmn_fey.gmd`, `c_awmn_fey_head.gmd`,
 `f_man_pattern_fey.mmo` (95 clips) — an untouched import exports
 **byte-identical** to the source file.
 
+v0.1.1 fixes double axis conversion on parented meshes and decodes UVs as
+binary16 pairs rather than normalized integers. Opaque non-finite UV words
+are preserved during untouched export; their shader-specific meaning remains
+unconfirmed.
+
 ## Install
 
 Copy the `io_binary_domain/` folder into your Blender addons directory
@@ -24,8 +29,7 @@ attribute; older versions import without custom normals).
 - Textures (`<name>.dds`) are loaded from the folder next to the `.gmd`.
 - One Blender mesh object per draw record, parented to the armature with an
   Armature modifier; vertex groups match the record's bone palette.
-- The model is stored in **raw game coordinates (Y-up)**; the armature and
-  mesh objects carry a +90° X rotation so it displays correctly in Blender's
+- The model is stored in **raw game coordinates (Y-up)**; the armature carries a +90° X rotation, inherited by its meshes so it displays correctly in Blender's
   Z-up world. Do not apply/clear that rotation.
 - Bone rest transforms are exact world matrices from the file; bone
   *directions* (head→tail) follow each bone's own rotation axis, so the
@@ -68,7 +72,7 @@ What round-trips exactly:
 |---|---|---|
 | Bone pose | Pose Mode transforms | rest-pose edits are rejected with an error |
 | Positions / normals | mesh vertices / custom split normals | normals are biased bytes, decode/encode is lossless |
-| UV / UV2 | `UVMap` / `UV2` layers | V is flipped for Blender (lossless) |
+| UV / UV2 | `UVMap` / `UV2` layers | binary16 UV pairs; V is flipped for Blender |
 | Skin weights | raw `gmd_w` / `gmd_bi` attributes | **weight edits are NOT exported in v1** (groups are for deformation only); delete both attributes to force re-encoding from vertex groups |
 | Tangents, misc bytes | raw `gmd_nb` / `gmd_w1` / `gmd_w2` attributes | opaque data, preserved verbatim |
 
@@ -91,7 +95,7 @@ GMD = `GSGM` big-endian container; 17-chunk directory: skeleton (world
 transforms, axis-angle), helper bones (pos+quat), 130 mesh records (vmap =
 vertex list *with duplicates*; faces index stream-local vertex ids), 38
 materials (shader index + 8 u32 texture slots), 5 vertex streams (strides
-40/36/32/20; normals `(b−128)/127`, UVs `u16/65535`), u16 index buffer,
+40/36/32/20; normals `(b−128)/127`, UVs IEEE 754 binary16 pairs), u16 index buffer,
 u8 bone palette, texture/shader/bone-name tables.
 
 MOMO = `MOMO` + clip containers `RAW0{HED0,HED1,PRG2,TRK2}`; TRK2 holds
