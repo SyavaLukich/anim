@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.6.0
+# Binary Domain Blender addon — v0.7.0
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -263,6 +263,52 @@ Exact game behavior still requires reconstructing terrain queries, contact
 state, joint limits, torso solving and all code-specific procedural operators.
 Do not interpret successful math/Blender tests as game-equivalence validation.
 
+### Animator control rig (v0.7.0)
+
+A persistent, editable alternative to one-shot correction baking. Select an
+imported GMD armature and click **Create animator control rig**. This builds
+a **separate non-deforming control armature**, parented to the imported
+armature object. The original bones, rest pose, skin weights, mesh parenting
+and existing Actions are never modified; the deform skeleton simply follows
+the controls through world-space constraints that can be disabled or removed.
+
+- Same-named **FK bones** on the control armature carry a copy of the current
+  Action, so an animated clip starts in FK and plays back unchanged.
+- `CTRL_global` moves the whole rig; `CTRL_body` moves the pelvis/torso.
+  Hand/foot goal controls and elbow/knee pole controls live under
+  `CTRL_global`, so in IK the feet stay planted while the body moves.
+- **Match IK / Match FK** buttons place the controls on the current limb
+  pose and key the IK/FK switch at the current frame (with the previous
+  state keyed one frame earlier), so switching does not pop. Matching is
+  accurate to about 4e-05 matrix units on the tested walk clip.
+- **Convert FK clip to IK keys** keys goals, poles and mechanism bones from
+  the copied FK clip over a chosen range (up to 2001 frames), turning an
+  imported clip into editable IK animation.
+- Each foot control has a **roll** property (radians): positive rolls over
+  the toe pivot, negative over the heel pivot, around armature-local ground
+  height Y=0. This is a manual pivot, not terrain detection.
+- **Helper blend (approx.)** optionally shares driver deformation onto the
+  named twist/elbow/knee helper bones, using the same approximate
+  OPE0-derived identities as the v0.6 bake. It is not OPE0 execution.
+- After applying a different clip to the original skeleton, use **Copy
+  source Action to FK controls** to re-sync the rig. **Bake controls to
+  original skeleton** writes the evaluated result into a new Action and
+  disables the live rig; **Remove control rig** deletes the controls and
+  their follower constraints, restoring direct Action playback.
+
+Limitations: this is Blender's IK, not the game's IK or contact system.
+There are no joint limits and no stretching — an unreachable goal leaves
+the limb pointing at it with preserved segment lengths. Feet are planted
+only because their goal controls do not move; there is no ground raycast,
+contact detection or terrain adaptation. The v0.6 bake and this rig are
+alternatives: do not stack a correction bake on a rig-driven pose.
+
+Validation: `tests/test_control_rig.py` checks FK preservation of a real
+walk clip at sampled frames, no-pop IK matching, converted-IK preservation,
+planted feet under body motion, foot-roll pivoting, reversible helper
+blending, bake fidelity and segment lengths, save/reopen persistence and
+clean removal.
+
 ### Exact source data
 
 Each pose/motion Action keeps:
@@ -364,3 +410,5 @@ Temporal tests: `tests/test_body_motion.py` (bpy + local fixtures), `tests/test_
 Universal human-body corpus/Blender regression: `tests/test_body_universal.py` (local extracted `p_man*.mmo` fixtures; not distributed).
 
 Correction tests: `LD_LIBRARY_PATH=/home/user/xlibs python3 tests/test_body_corrections.py` (six math tests; additional fixture tests run when local game data is available).
+
+Control-rig tests: `LD_LIBRARY_PATH=/home/user/xlibs python3 tests/test_control_rig.py` (fixture test runs when local game data is available).

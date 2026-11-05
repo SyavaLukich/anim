@@ -6,6 +6,14 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.7.0:** persistent **animator control rig** in a separate non-deforming
+armature: same-name FK bones carry the current clip, hand/foot IK goals with
+elbow/knee poles, no-pop Match IK/FK with the switch keyed at the current
+frame, FK→IK key conversion, planted feet while `CTRL_body` moves, heel/toe
+foot roll, approximate helper blending, bake-back to a new Action and clean
+removal. The deform skeleton, rest pose, weights and source Actions are
+untouched. Blender IK only — **not game IK, terrain contact or OPE0**.
+
 **v0.6.0:** optional **Blender-side** source-anchor IK, flat-ground foot
 stabilization (automatic or manual contacts), and approximate twist/bend helper
 rotation sharing. Bakes a separate Action and keeps the original. **Not exact

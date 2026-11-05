@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 6, 0),
+    "version": (0, 7, 0),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face/body animations",
@@ -31,6 +31,7 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 from . import gmd as gmd_mod
 from . import mmo as mmo_mod
 from . import body_corrections as correction_mod
+from . import control_rig as control_mod
 
 # Blender can re-execute the package after an update while retaining old
 # parser submodules in sys.modules. Refresh both pure-Python modules too.
@@ -38,6 +39,7 @@ import importlib
 importlib.reload(gmd_mod)
 importlib.reload(mmo_mod)
 importlib.reload(correction_mod)
+importlib.reload(control_mod)
 
 AXIS_CONV = mathutils.Matrix.Rotation(math.pi / 2, 3, 'X')  # game Y-up -> Blender Z-up (display only)
 BONE_LEN = 0.05
@@ -1583,6 +1585,9 @@ class BDOMAIN_PT_panel(bpy.types.Panel):
     def draw(self, context):
         lay = self.layout
         ob = context.object
+        control_mod.draw(lay, ob)
+        if ob and ob.get('bd_control_kind') == 'animator_v1':
+            return
         if ob and ob.type == 'ARMATURE' and ob.get('gmd_source') and ob.get('gmd_skinning_version') != 2:
             lay.label(text='Old skin groups need repair', icon='ERROR')
             lay.operator('bdomain.repair_skin')
@@ -1637,7 +1642,7 @@ def menu_export(self, context):
     self.layout.operator(BDOMAIN_OT_export_gmd.bl_idname, text='Binary Domain Model (.gmd)')
 
 
-classes = (BDOMAIN_OT_body_corrections, BDOMAIN_PG_clip, BDOMAIN_UL_clips, BDOMAIN_OT_apply_selected,
+classes = control_mod.CLASSES + (BDOMAIN_OT_body_corrections, BDOMAIN_PG_clip, BDOMAIN_UL_clips, BDOMAIN_OT_apply_selected,
            BDOMAIN_OT_refresh_clip_list, BDOMAIN_OT_cleanup_momo, BDOMAIN_OT_import_gmd, BDOMAIN_OT_export_gmd, BDOMAIN_OT_load_momo,
            BDOMAIN_OT_apply_clip, BDOMAIN_OT_preview_momo, BDOMAIN_OT_repair_skin, BDOMAIN_PT_panel)
 
