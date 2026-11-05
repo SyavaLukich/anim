@@ -156,3 +156,19 @@ validates all relevant topology first, restores only UVMap, and does not
 save the scene automatically. Save a backup before running it. Tested on the
 supplied scene in Blender 4.5: 53 UV-bearing objects restored; face UVs match
 the corrected decoder exactly. The original 5.1 file is not overwritten.
+
+## File picker fix (v0.1.6)
+
+Blender cannot open a nested file browser while the GMD import browser is
+already open. Optional MOMO/MOMA paths in that dialog are now plain text
+fields (paste full paths), without nested browse buttons. The optional rig
+path in the MOMO picker is also plain text. To browse for a MOMO file:
+
+1. Import the GMD without a MOMO path.
+2. Select its armature and return to the 3D View.
+3. Open N-panel > Binary Domain > Load MOMO clips and select the `.mmo`.
+
+The bundled `f_man.mma` rig is used when the rig field is empty. Operator/RNA
+regression tests verify that nested path fields have no file-picker subtype;
+the standalone MOMO import operator loads all 95 test clips successfully.
+GUI interaction in Blender 5.1 is not covered by the headless test suite.

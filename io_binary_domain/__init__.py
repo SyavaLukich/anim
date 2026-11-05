@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 1, 5),
+    "version": (0, 1, 6),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -560,7 +560,7 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     filepath: StringProperty(subtype='FILE_PATH')
-    rig_mma: StringProperty(subtype='FILE_PATH',
+    rig_mma: StringProperty(subtype='NONE',
                             description='MOMA rig with node names (default: bundled f_man.mma)')
     bake_euler: BoolProperty(
         name='Experimental Euler bake', default=False,
@@ -632,12 +632,22 @@ class BDOMAIN_OT_import_gmd(bpy.types.Operator, ImportHelper):
     filename_ext = '.gmd'
     filter_glob: StringProperty(default='*.gmd', options={'HIDDEN'})
     mmo_path: StringProperty(
-        name='MOMO animation', subtype='FILE_PATH',
-        description='Optional .mmo face animation to import with the model')
+        name='MOMO path (paste)', subtype='NONE',
+        description='Paste an optional .mmo path, or import the model first and use N-panel > Binary Domain > Load MOMO clips')
     rig_mma: StringProperty(
-        name='MOMA rig', subtype='FILE_PATH',
+        name='MOMA rig path (paste)', subtype='NONE',
         description='Rig with node names (default: bundled f_man.mma)')
     bake_euler: BoolProperty(name='Experimental Euler bake', default=False)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text='Optional paths: paste full file paths')
+        layout.prop(self, 'mmo_path')
+        layout.prop(self, 'rig_mma')
+        layout.prop(self, 'bake_euler')
+        layout.separator()
+        layout.label(text='Or load MOMO after model import:')
+        layout.label(text='N-panel > Binary Domain > Load MOMO clips')
 
     def execute(self, context):
         try:

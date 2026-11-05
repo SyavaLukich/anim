@@ -8,6 +8,7 @@
 import os
 import sys
 import struct
+import json
 
 sys.path.insert(0, '/home/user/anim')
 os.chdir('/tmp/extract/out')
@@ -26,6 +27,12 @@ gmd_mod.GMD.uv_offset = lambda self, sid: -999
 importlib.reload(iobd)
 # uv_offset needs an instance; the declaration assertions below verify reload.
 iobd.register()
+# File browsers cannot open a second file picker for optional paths.
+assert bpy.ops.import_scene.gmd.get_rna_type().properties['mmo_path'].subtype == 'NONE'
+assert bpy.ops.import_scene.gmd.get_rna_type().properties['rig_mma'].subtype == 'NONE'
+assert bpy.ops.bdomain.load_momo.get_rna_type().properties['rig_mma'].subtype == 'NONE'
+assert bpy.ops.bdomain.load_momo.get_rna_type().properties['filepath'].subtype == 'FILE_PATH'
+
 
 GMD_FILES = ['c_awmn_fey.gmd', 'c_awmn_fey_head.gmd', 'c_awmn_fey_last.gmd',
              'c_awmn_fey_mant.gmd', 'c_awmn_fey_naked.gmd']
@@ -188,7 +195,8 @@ fresh()
 bpy.ops.import_scene.gmd(filepath=os.path.abspath('c_awmn_fey.gmd'))
 arm_obj = [o for o in bpy.data.objects if o.type == 'ARMATURE'][0]
 bpy.context.view_layer.objects.active = arm_obj
-n = iobd.load_momo_actions(arm_obj, os.path.abspath('f_man_pattern_fey.mmo'))
+assert bpy.ops.bdomain.load_momo(filepath=os.path.abspath('f_man_pattern_fey.mmo')) == {'FINISHED'}
+n = len(json.loads(arm_obj['gmd_clips']))
 clips = mmo_mod.parse_momo(open('f_man_pattern_fey.mmo', 'rb').read())
 names_ok = n == len(clips) == 95
 act0 = bpy.data.actions.get('f_man_pattern_fey__f_man_fey__a')
