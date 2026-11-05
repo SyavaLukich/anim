@@ -324,6 +324,11 @@ the controls through world-space constraints that can be disabled or removed.
 - Each foot control has a **roll** property (radians): positive rolls over
   the toe pivot, negative over the heel pivot, around armature-local ground
   height Y=0. This is a manual pivot, not terrain detection.
+- **Helper blend** (default 1) shares each OPE0 helper bone's
+  neighbouring joint rotation onto it (35% local share), which keeps
+  shoulder/hip skin from collapsing in deep poses — an approximation
+  of the game's procedural helpers, not exact OPE0. It is suspended
+  while converting, so converted clips still match raw FK.
 - **Helper blend (approx.)** optionally shares driver deformation onto the
   named twist/elbow/knee helper bones, using the same approximate
   OPE0-derived identities as the v0.6 bake. It is not OPE0 execution.

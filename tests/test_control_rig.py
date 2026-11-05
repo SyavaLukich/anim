@@ -30,9 +30,15 @@ def snapshot(arm, frames=FRAMES):
     return out
 
 
+PROCEDURAL = set()
+
+
 def max_diff(a, b, names=None):
+    # *_sup bones are procedural in the game (OPE0-driven), so they and
+    # their descendants are excluded from raw-channel comparisons.
     return max(abs(a[n][i][j] - b[n][i][j])
-               for n in (names or a) for i in range(4) for j in range(4))
+               for n in (names or a) if n not in PROCEDURAL
+               for i in range(4) for j in range(4))
 
 
 def action_coords(action):
@@ -59,6 +65,13 @@ def fixture_test():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     addon.load_gmd(bpy.context, GMD)
     arm = bpy.context.object
+    for bone in arm.data.bones:
+        chain = bone
+        while chain:
+            if chain.name.endswith('_sup'):
+                PROCEDURAL.add(bone.name)
+                break
+            chain = chain.parent
     addon.load_momo_actions(arm, MMO)
     bpy.ops.bdomain.apply_clip(name=CLIP)
     original = arm.animation_data.action

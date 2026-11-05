@@ -6,6 +6,18 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.8.7:** deformation helpers fixed (per updated `требования.txt`:
+"shoulders and hip deform in some poses"). All OPE0 helper bones
+(`*_sup`: thigh/shin muscles, forearm twist, deltoid, chest) are now
+wired — previously only twist/elbow/knee-named ones, and the whole
+system defaulted to off. Each helper takes a 35% share of the
+neighbouring joint's local rotation on top of its FK pose, and
+**Helper blend now defaults to 1**. Measured on the reported squat
+pose: worst-1% skin edge stretch improves 1.78→1.46 (arms) and
+1.85→1.70 (legs). Convert still reproduces raw FK exactly (helpers
+are suspended while converting). Recreating the rig is required for
+the new wiring on older scenes.
+
 **v0.8.6:** shoulder-girdle auto-follow (per updated `требования.txt`) —
 in arm IK the clavicle now rises/protracts with the hand (driven
 `MCH_shoulder_*_base`, strength slider "Shoulder assist", manual

@@ -36,7 +36,7 @@ LIMIT_PROFILES = {
     'neck':  {'flex': (0.65, 0.55), 'side': (0.70, 0.65), 'twist': (1.00, 0.90)},
 }
 HYPER_EXTENSION = 0.12  # rad of allowed bend past straight, for every hinge
-RIG_VERSION = 'v0.8.6'
+RIG_VERSION = 'v0.8.7'
 # Clavicle/shoulder controls: single-bone drivers for kata_*_n.
 SHOULDERS = {'shoulder_l': 'kata_l_n', 'shoulder_r': 'kata_r_n'}
 
@@ -345,7 +345,7 @@ def create(source, ik_default=False):
     ctrl.matrix_basis = Matrix.Identity(4)
     ctrl['bd_control_kind']='animator_v1'; ctrl['bd_source']=source; ctrl['bd_uid']=uuid.uuid4().hex
     prop(ctrl,'bd_enabled',1.0,description='Follow animator rig; zero restores original Action')
-    prop(ctrl,'bd_helpers',0.0,description='Approximate twist/bend sharing; not game OPE0')
+    prop(ctrl,'bd_helpers',1.0,description='Game-style muscle/twist helper bones (approximate sharing; not exact OPE0)')
     for limb in LIMBS: prop(ctrl,'bd_ik_'+limb,0.0,description='0: FK / 1: IK (use Match buttons to avoid jumps)')
     for key in SHOULDERS: prop(ctrl,'bd_'+key,0.0,description='0: FK clip / 1: shoulder (clavicle) control')
     prop(ctrl,'bd_shoulder_assist',0.35,description='Clavicle auto-follow: shoulder girdle rises/reaches with the arm in IK')
@@ -442,13 +442,22 @@ def create(source, ik_default=False):
         for op in rig['operations']:
             name=rig['nodes'][op['target']]
             drivers=[rig['nodes'][i] for i in op['drivers'] if i>=0]
-            if (name not in source.data.bones or len(drivers)<2 or
-                    not any(x in name for x in ('twist','elbow','knee'))): continue
-            if any(d not in source.data.bones for d in drivers[-2:]): continue
-            helper_drivers[name]=drivers[-2:]
-            for i,parent in enumerate(drivers[-2:]):
-                original=source.data.bones[name]
-                _new_bone(data,f'MCH_share_{i}_{name}',original.head_local,original.tail_local,parent,original.matrix_local)
+            if name not in source.data.bones or len(drivers)<2: continue
+            original=source.data.bones[name]
+            # Share between the two driver bones nearest the helper:
+            # muscle/twist helpers sit between the joints they serve.
+            present=[d for d in drivers if d in source.data.bones]
+            present.sort(key=lambda d: (source.data.bones[d].head_local
+                                        - original.head_local).length)
+            if len(present)<2: continue
+            # The helper rides its natural parent (one of the drivers);
+            # it additionally takes a share of the other nearest
+            # driver's local rotation, distributing the joint's
+            # twist/bend over the helper instead of letting the skin
+            # collapse at the joint.
+            parent_name = original.parent.name if original.parent else None
+            others = [d for d in present[:2] if d != parent_name]
+            helper_drivers[name] = others[0] if others else present[0]
         bpy.ops.object.mode_set(mode='POSE')
         controls=data.collections.new('BD Controls')
         fk=data.collections.new('BD FK (original names)')
@@ -572,9 +581,12 @@ def create(source, ik_default=False):
                 var = driven.variables.new(); var.name = 'assist'
                 var.type = 'SINGLE_PROP'; var.targets[0].id = ctrl
                 var.targets[0].data_path = '["bd_shoulder_assist"]'
-        for name in helper_drivers:
-            for i in (0,1):
-                _copy(ctrl.pose.bones[name],ctrl,f'MCH_share_{i}_{name}',ctrl,'bd_helpers',1 if i==0 else .5,rotation_only=True)
+        for name, other in helper_drivers.items():
+            share = ctrl.pose.bones[name].constraints.new('COPY_ROTATION')
+            share.name = PREFIX+'helper share '+name
+            share.target = ctrl; share.subtarget = other
+            share.target_space = 'LOCAL'; share.owner_space = 'LOCAL'
+            driver(share, ctrl, 'bd_helpers', 0.35)
         circle=_widget(ctrl,'circle','circle'); diamond=_widget(ctrl,'pole','diamond')
         for pb in ctrl.pose.bones:
             if not pb.name.startswith('CTRL_'): continue
@@ -1081,6 +1093,9 @@ def convert_to_ik(ctrl, start, end, limbs=None):
     old_assist = ctrl['bd_shoulder_assist'] if 'bd_shoulder_assist' in ctrl else None
     if old_assist is not None:
         ctrl['bd_shoulder_assist'] = 0.0
+    old_helpers = ctrl['bd_helpers'] if 'bd_helpers' in ctrl else None
+    if old_helpers is not None:
+        ctrl['bd_helpers'] = 0.0
     try:
         for limb in limbs:
             ctrl['bd_ik_'+limb] = 0.0
@@ -1139,6 +1154,8 @@ def convert_to_ik(ctrl, start, end, limbs=None):
     finally:
         if old_assist is not None:
             ctrl['bd_shoulder_assist'] = old_assist
+        if old_helpers is not None:
+            ctrl['bd_helpers'] = old_helpers
         scene.frame_set(old_frame, subframe=old_subframe)
         refresh(ctrl)
 
