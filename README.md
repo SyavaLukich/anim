@@ -6,6 +6,11 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.6.0:** optional **Blender-side** source-anchor IK, flat-ground foot
+stabilization (automatic or manual contacts), and approximate twist/bend helper
+rotation sharing. Bakes a separate Action and keeps the original. **Not exact
+game IK, OPE0 execution or terrain collision.** See the detailed limitations.
+
 **v0.5.0:** general human `p_man` animation libraries, without a clip-name
 allowlist: **203/203** Fey handgun clips, **40/40** adventure clips. Dense,
 sparse and segmented compression, 54/55/85-channel layouts, centroid root

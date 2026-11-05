@@ -307,3 +307,37 @@ native Actions for idle/walk/turn/55-channel motion, the 54-channel T-pose,
 float/packed Euler motion, root travel/yaw, lengths, and saved Action reuse.
 This does not establish engine-equivalent IK/procedural controls, animation
 blending, every nonhuman MOMA, or game-side animation export.
+
+## v0.6.0 anchor and procedural metadata; optional Blender adaptation
+
+p_man `ANC0` payload: u16 count=5, u16 reserved=0, then count pairs of
+u16 endpoint/root node indices: (3,1), (17,15), (22,20), (29,27), (40,38).
+For this rig each endpoint's parent is the middle joint, whose parent is the
+listed root. These identify the spine, left/right leg and left/right arm chains.
+The addon now parses and validates the table. Its optional analytic IK uses
+the four limb chains and source endpoint positions; it does NOT reproduce the
+engine's full solver, joint limits, pelvis/torso adjustment or terrain queries.
+
+p_man `OPE0` payload: u32 count=24, u32 reserved=0, followed by count 32-byte
+records. First six s16: operation ID, target node, four driver node indices
+(-1 denotes unused). Remaining 20 bytes are preserved opaquely (zero in this
+bundled rig). IDs observed: 1–6, 9–24 and 57/58. Nodes include sterno, muscle,
+knee, twist, elbow and shoulder-pad helpers. Preserve full record bytes and
+validate target/driver bounds; do NOT equate every flag-6 node to a quaternion.
+
+EXE OPE0 loader D9B286..D9B456 converts the records to 16-byte runtime
+operation entries, replacing negative driver indices with zero, and invokes
+per-operation initialization through table 01366BC4. Runtime dispatch references
+013669BC at D8A4EC/D8A5F8. Examples: ID 5/6 wrapper 40FA70 -> F1FE20;
+ID 9/10 wrapper 40FAB0 -> F05E10. These code-specific operators are **not**
+implemented by the optional helper blend. Parsing the table is not executing it.
+
+The optional correction baker is a separate approximation layer. It keeps the
+raw Action, solves fixed-length limb chains against source goals, then optionally
+stabilizes ankles on manually specified or heuristically detected flat-plane
+contacts. Approximate named twist/bend helpers blend driver bind-relative
+world deformation rotations. Other procedural operators are untouched. It
+stores settings/contact intervals/reach errors and installs no constraints or
+handlers. Neither automatic contact detection nor quaternion averaging is
+claimed to be the game's implementation. Terrain collision, full OPE0, foot
+controller state, full-body IK and game animation export remain unimplemented.

@@ -497,6 +497,28 @@ def parse_moma(data):
             raise ValueError('invalid MOMA default positions')
         res['rest_positions'] = [[v/scale for v in struct.unpack_from('>3h', data, o+16+16*i)]
                                  for i in range(count)]
+    if b'ANC0' in inner:
+        o, ln = inner[b'ANC0']
+        count, reserved = struct.unpack_from('>2H', data, o)
+        if ln != 4+count*4:
+            raise ValueError('invalid MOMA anchor table size')
+        res['anchors'] = [list(v) for v in struct.iter_unpack('>2H', data[o+4:o+ln])]
+        for end, root in res['anchors']:
+            if end >= len(res['nodes']) or root >= len(res['nodes']):
+                raise ValueError('MOMA anchor node out of range')
+    if b'OPE0' in inner:
+        o, ln = inner[b'OPE0']
+        count, reserved = struct.unpack_from('>2I', data, o)
+        if ln != 8+32*count:
+            raise ValueError('invalid MOMA operation table size')
+        res['operations'] = []
+        for i in range(count):
+            p = o+8+32*i
+            code, target, *drivers = struct.unpack_from('>6h', data, p)
+            if not 0 <= target < len(res['nodes']) or any(d >= len(res['nodes']) or d < -1 for d in drivers):
+                raise ValueError('MOMA procedural node out of range')
+            res['operations'].append(dict(code=code, target=target, drivers=drivers,
+                                          raw=data[p:p+32].hex()))
     if b'MIR0' in inner:
         o, l = inner[b'MIR0']
         cnt = struct.unpack_from('>I', data, o)[0]

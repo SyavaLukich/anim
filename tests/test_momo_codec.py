@@ -218,6 +218,23 @@ class ConstantChannels(unittest.TestCase):
             mmo.momo_rig_name(
                 b'MOMO'+bytes(12)+b'MTS0'+struct.pack('>I', 10)+b'\0\xff')
 
+    def test_moma_anchors_and_operations(self):
+        def chunk(tag, payload):
+            return tag+struct.pack('>I', len(payload)+8)+payload
+        nodes = chunk(b'RMN0', struct.pack('>I', 3)+b'\0\2a\0\0\2b\0\0\2c\0')
+        anchor = chunk(b'ANC0', struct.pack('>2H2H', 1, 0, 2, 0))
+        operation = struct.pack('>6h', 19, 2, 0, 1, -1, -1)+bytes(20)
+        ops = chunk(b'OPE0', struct.pack('>2I',1,0)+operation)
+        data = b'MOMA'+bytes(12)+nodes+anchor+ops
+        rig = mmo.parse_moma(data)
+        self.assertEqual(rig['anchors'], [[2,0]])
+        self.assertEqual(rig['operations'][0]['drivers'], [0,1,-1,-1])
+        self.assertEqual(rig['operations'][0]['raw'], operation.hex())
+        with self.assertRaisesRegex(ValueError, 'anchor node'):
+            mmo.parse_moma(b'MOMA'+bytes(12)+nodes+chunk(b'ANC0',struct.pack('>4H',1,0,4,0)))
+        with self.assertRaisesRegex(ValueError, 'operation table size'):
+            mmo.parse_moma(b'MOMA'+bytes(12)+nodes+chunk(b'OPE0',struct.pack('>2I',2,0)+operation))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 5, 0),
+    "version": (0, 6, 0),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face/body animations",
@@ -25,17 +25,19 @@ import math
 import mathutils
 import os
 import struct
-from bpy.props import (StringProperty, BoolProperty, IntProperty, EnumProperty, CollectionProperty)
+from bpy.props import (StringProperty, BoolProperty, IntProperty, EnumProperty, CollectionProperty, FloatProperty)
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from . import gmd as gmd_mod
 from . import mmo as mmo_mod
+from . import body_corrections as correction_mod
 
 # Blender can re-execute the package after an update while retaining old
 # parser submodules in sys.modules. Refresh both pure-Python modules too.
 import importlib
 importlib.reload(gmd_mod)
 importlib.reload(mmo_mod)
+importlib.reload(correction_mod)
 
 AXIS_CONV = mathutils.Matrix.Rotation(math.pi / 2, 3, 'X')  # game Y-up -> Blender Z-up (display only)
 BONE_LEN = 0.05
@@ -715,13 +717,16 @@ def _bake_body_motion(arm, clip, rig):
     return curves
 
 
-def _fill_body_motion_curves(action, samples):
+def _fill_body_motion_curves(action, samples, preserve_extra=False):
     if hasattr(action, 'slots') and len(action.slots) and len(action.layers):
         curves = action.layers[0].strips[0].channelbag(action.slots[0]).fcurves
     else:
         curves = action.fcurves
     for curve in curves:
-        coords = samples[(curve.data_path, curve.array_index)]
+        key = (curve.data_path, curve.array_index)
+        if preserve_extra and key not in samples:
+            continue
+        coords = samples[key]
         curve.keyframe_points.clear()
         curve.keyframe_points.add(len(coords)//2)
         curve.keyframe_points.foreach_set('co', coords)
@@ -735,24 +740,8 @@ def _is_body_rig(rig):
             ['moo_centroid', 'center_c_n'])
 
 
-def _body_bases(arm, clip, rig, frame=0):
-    """Length-preserving anatomical retarget for p_gen poses / p_man motion.
-
-    Use actual GMD local quaternions at record +0x30, NOT direction/length
-    fields at +0x60 interpreted as axis-angle. Keep proportions/root anchor.
-    Model-specific face/hair/support bones follow their target parents rigidly.
-    Procedural MOMA nodes absent on the target are not invented/animated.
-    """
-    motion = _is_body_motion(rig)
-    if motion:
-        if not (math.isfinite(clip.speed) and clip.speed > 0 and clip.fps > 0):
-            raise GmdExportError('Invalid body source FPS/speed')
-    elif clip.name != 'p_gen_tpose' or clip.header != 644 or not _is_body_rig(rig):
-        raise GmdExportError('Body retarget requires a matching p_gen T-pose or p_man rig')
-    if any(t.kind != 'scalar' for t in clip.tracks[:3 if motion else 8]):
-        raise GmdExportError('Invalid auxiliary body channel types')
-    if not motion and any(abs(mmo_mod.sample_track(t, frame)) > 1e-8 for t in clip.tracks[:8]):
-        raise GmdExportError('Nonzero p_gen auxiliary channels are not supported')
+def _body_source_worlds(clip, rig, frame, motion=True):
+    """Evaluate model-space MOMA transforms and separate centroid motion."""
     values = mmo_mod.pose_nodes(clip, rig, frame=frame, allow_missing_tail=motion)
     worlds = []
     for i, value in enumerate(values):
@@ -778,7 +767,28 @@ def _body_bases(arm, clip, rig, frame=0):
         centroid = worlds[rig['nodes'].index('moo_centroid')]
         worlds = [w if i == 0 or w is None else centroid @ w
                   for i, w in enumerate(worlds)]
-    source = {n: w for n, w in zip(rig['nodes'], worlds) if w is not None}
+    return {n: w for n, w in zip(rig['nodes'], worlds) if w is not None}
+
+
+def _body_bases(arm, clip, rig, frame=0):
+    """Length-preserving anatomical retarget for p_gen poses / p_man motion.
+
+    Use actual GMD local quaternions at record +0x30, NOT direction/length
+    fields at +0x60 interpreted as axis-angle. Keep proportions/root anchor.
+    Model-specific face/hair/support bones follow their target parents rigidly.
+    Procedural MOMA nodes absent on the target are not invented/animated.
+    """
+    motion = _is_body_motion(rig)
+    if motion:
+        if not (math.isfinite(clip.speed) and clip.speed > 0 and clip.fps > 0):
+            raise GmdExportError('Invalid body source FPS/speed')
+    elif clip.name != 'p_gen_tpose' or clip.header != 644 or not _is_body_rig(rig):
+        raise GmdExportError('Body retarget requires a matching p_gen T-pose or p_man rig')
+    if any(t.kind != 'scalar' for t in clip.tracks[:3 if motion else 8]):
+        raise GmdExportError('Invalid auxiliary body channel types')
+    if not motion and any(abs(mmo_mod.sample_track(t, frame)) > 1e-8 for t in clip.tracks[:8]):
+        raise GmdExportError('Nonzero p_gen auxiliary channels are not supported')
+    source = _body_source_worlds(clip, rig, frame, motion)
     root_delta = mathutils.Vector((0, 0, 0))
     if motion:
         root_index = rig['nodes'].index('center_c_n')
@@ -1345,6 +1355,225 @@ class BDOMAIN_OT_export_gmd(bpy.types.Operator, ExportHelper):
         return {'FINISHED'}
 
 
+def bake_body_corrections(arm, source_ik=True, hands=True, feet=True,
+                          foot_lock=True, helpers=False, ground=0.0,
+                          height_tolerance=.04, speed_limit=.35, blend_frames=2,
+                          left_contacts='', right_contacts=''):
+    """Bake an opt-in adaptation into a new Action; never modify source keys.
+
+    Source-anchor IK uses ANC0 endpoints; contact detection and helper blending
+    are explicitly heuristic, not game OPE0/terrain/controller emulation.
+    """
+    from array import array
+    correction = correction_mod
+    action = arm.animation_data.action if arm.animation_data else None
+    if action is None or action.get('gmd_momo_kind') != 'body_motion':
+        raise GmdExportError('Select an uncorrected p_man body Action first')
+    if action.get('gmd_body_corrections'):
+        raise GmdExportError('Apply the original clip first; do not stack correction bakes')
+    if any(c for pb in arm.pose.bones for c in pb.constraints if not c.mute):
+        raise GmdExportError('Mute existing pose constraints before baking body corrections')
+    if any(not d.mute for d in arm.animation_data.drivers) or any(not t.mute for t in arm.animation_data.nla_tracks):
+        raise GmdExportError('Mute NLA tracks and remove/mute drivers before correction baking')
+    if not (source_ik or foot_lock or helpers):
+        raise GmdExportError('Enable at least one correction')
+    count = int(action['gmd_source_frames'])+1
+    contacts = {side: correction.parse_contacts(text, count)
+                for side, text in (('l', left_contacts), ('r', right_contacts))}
+    rig = json.loads(arm.get('gmd_momo_rig', '{}'))
+    if not _is_body_motion(rig):
+        raise GmdExportError('The matching p_man MOMA is required')
+    if 'anchors' not in rig or 'operations' not in rig:
+        bundled = mmo_mod.parse_moma(open(_default_rig_path(True, True), 'rb').read())
+        rig.setdefault('anchors', bundled['anchors'])
+        rig.setdefault('operations', bundled['operations'])
+    clip = None
+    if source_ik:
+        path = _input_file_path(arm.get('gmd_momo'), '.mmo', 'Source MOMO for anchor IK')
+        data = open(path, 'rb').read()
+        clip = next((c for c in mmo_mod.parse_momo(data, False)
+                     if c.name == action.get('gmd_expression')), None)
+        if clip is None or clip.frames+1 != count or clip.hed0_raw.hex() != action.get('gmd_source_header'):
+            raise GmdExportError('Source MOMO no longer matches the selected Action')
+        mmo_mod.decode_clip(data, clip)
+        raw_words = json.loads(action.get('gmd_momo_raw_words', 'null'))
+        if raw_words != [list(t.words) for t in clip.tracks]:
+            raise GmdExportError('Source channel data changed; reload the original clip before source IK')
+    chains = []
+    for end, root in rig['anchors']:
+        middle = rig['parents'][end]
+        if middle < 0 or rig['parents'][middle] != root:
+            continue
+        names = [rig['nodes'][i] for i in (root, middle, end)]
+        selected = (feet and names[-1].startswith('asi3_')) or (hands and names[-1].startswith('ude3_'))
+        if selected and all(n in arm.pose.bones for n in names):
+            chains.append(names)
+    if source_ik and not chains:
+        raise GmdExportError('Select at least one available hand/foot source IK chain')
+    parents = {b.name: b.parent.name if b.parent else None for b in arm.data.bones}
+    rest = {b.name: b.matrix_local.copy() for b in arm.data.bones}
+    fps = action.get('gmd_source_fps', 30)*action.get('gmd_source_speed', 1)
+    if not math.isfinite(fps) or fps <= 0:
+        raise GmdExportError('Invalid Action FPS/speed')
+    scale = arm.data.bones['center_c_n'].head_local.y/rig['rest_positions'][1][1]
+    if not math.isfinite(scale) or scale <= 0:
+        raise GmdExportError('Invalid target/source body height')
+    origin = mathutils.Vector((0, 0, 0))
+    if clip:
+        first = _body_source_worlds(clip, rig, 0)['center_c_n'].translation
+        target = arm.data.bones['center_c_n'].head_local
+        origin = mathutils.Vector((target.x-first.x*scale,
+                                   target.y-rig['rest_positions'][1][1]*scale,
+                                   target.z-first.z*scale))
+    scene = bpy.context.scene
+    old_frame, old_subframe = scene.frame_current, scene.frame_subframe
+    frames = []; clamped = 0; created = None; samples = {}; previous = {}
+    report = dict(implementation='blender_adaptation_not_game_emulation',
+                  source_action=action.name, source_ik=source_ik, hands=hands,
+                  feet=feet, foot_lock=foot_lock, helper_blend_approx=helpers,
+                  ground_gmd_y=ground, height_tolerance=height_tolerance,
+                  speed_limit=speed_limit, blend_frames=blend_frames, contacts={}, plateaus={})
+    try:
+        for frame in range(count):
+            scene.frame_set(frame+1); bpy.context.view_layer.update()
+            worlds = {pb.name: pb.matrix.copy() for pb in arm.pose.bones}
+            if clip:
+                source = _body_source_worlds(clip, rig, frame)
+                for names in chains:
+                    goal = origin+source[names[-1]].translation*scale
+                    fallback = rest[names[1]].translation-rest[names[0]].translation
+                    worlds, limited = correction.solve_chain(worlds, parents, names, goal, fallback=fallback)
+                    clamped += limited
+            frames.append(worlds)
+        locks = {}
+        if foot_lock:
+            for side in ('l', 'r'):
+                name = 'asi3_%s_n' % side
+                if name not in rest:
+                    raise GmdExportError('Both ankle joints are required for foot locking')
+                positions = [w[name].translation.copy() for w in frames]
+                rotations = [w[name].to_quaternion() for w in frames]
+                ankle_height = rest[name].translation.y
+                runs = contacts[side]
+                if runs is None:
+                    runs = correction.detect_contacts(positions, fps, ground, ankle_height,
+                                                       height_tolerance, speed_limit)
+                locks[side], plateaus = correction.lock_targets(positions, rotations, runs, ground,
+                                                               ankle_height, blend_frames)
+                report['contacts'][side] = [[a+1, b+1] for a,b in runs]
+                report['plateaus'][side] = [[a+1, b+1] for a,b in plateaus]
+        changed_helpers = set(); lock_error = 0.0
+        for frame, worlds in enumerate(frames):
+            if foot_lock:
+                for side, values in locks.items():
+                    if frame not in values:
+                        continue
+                    names = ['asi%d_%s_n' % (i, side) for i in (1, 2, 3)]
+                    goal, rot = values[frame]
+                    fallback = rest[names[1]].translation-rest[names[0]].translation
+                    worlds, limited = correction.solve_chain(worlds, parents, names, goal, rot, fallback)
+                    clamped += limited
+                    lock_error = max(lock_error, (worlds[names[-1]].translation-goal).length)
+            if helpers:
+                worlds, changed = correction.blend_helpers(worlds, parents, rest,
+                                                           rig['operations'], rig['nodes'])
+                changed_helpers.update(changed)
+            for bone in arm.data.bones:
+                parent = bone.parent
+                kwargs = dict(parent_matrix=worlds[parent.name], parent_matrix_local=parent.matrix_local) if parent else {}
+                basis = bone.convert_local_to_pose(worlds[bone.name], bone.matrix_local, invert=True, **kwargs)
+                loc, q, size = basis.decompose()
+                if bone.name in previous and q.dot(previous[bone.name]) < 0:
+                    q.negate()
+                previous[bone.name] = q.copy()
+                for prop, values in (('location', loc), ('rotation_quaternion', q), ('scale', size)):
+                    path = arm.pose.bones[bone.name].path_from_id(prop)
+                    for i, value in enumerate(values):
+                        if not math.isfinite(value):
+                            raise GmdExportError('Non-finite corrected pose')
+                        samples.setdefault((path, i), array('f')).extend((frame+1, value))
+        report.update(reach_clamps=clamped, max_lock_goal_error=lock_error,
+                      helpers=sorted(changed_helpers))
+        created = action.copy(); created.name = action.name+'__corrected'
+        created.use_fake_user = True
+        created['gmd_body_corrections'] = json.dumps(report)
+        _assign_momo_action(arm, created)
+        # Recreate deleted pose channels too; preserve unrelated custom curves.
+        for pb in arm.pose.bones:
+            _key_momo_basis(pb, pb.matrix_basis.copy(), 1)
+        _fill_body_motion_curves(created, samples, preserve_extra=True)
+        action.use_fake_user = True
+        return created
+    except Exception:
+        _assign_momo_action(arm, action)
+        if created:
+            bpy.data.actions.remove(created)
+        raise
+    finally:
+        scene.frame_set(old_frame, subframe=old_subframe); bpy.context.view_layer.update()
+
+
+class BDOMAIN_OT_body_corrections(bpy.types.Operator):
+    """Bake optional source-anchor IK and heuristic flat-ground stabilization.
+
+    This is NOT exact game IK, OPE0 execution or terrain collision.
+    Original Action is kept; apply the original clip to restore it.
+    """
+    bl_idname = 'bdomain.body_corrections'
+    bl_label = 'Bake body corrections (new Action)'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    source_ik: BoolProperty(name='Source anchor IK (requires MMO)', default=True)
+    hands: BoolProperty(name='Hands', default=True)
+    feet: BoolProperty(name='Feet', default=True)
+    foot_lock: BoolProperty(name='Flat-ground foot lock (heuristic)', default=True)
+    helpers: BoolProperty(name='Twist/elbow/knee blend (approximate)', default=False)
+    ground: FloatProperty(name='Ground height (GMD Y)', default=0, subtype='DISTANCE')
+    height_tolerance: FloatProperty(name='Contact height tolerance', default=.04, min=.001, max=1, subtype='DISTANCE')
+    speed_limit: FloatProperty(name='Contact speed limit (units/sec)', default=.35, min=.001, max=5)
+    blend_frames: IntProperty(name='Entry/exit blend frames', default=2, min=0, max=30)
+    left_contacts: StringProperty(name='Left contact ranges', description='Blank: automatic. Inclusive Blender frames: 1-12, 30-42')
+    right_contacts: StringProperty(name='Right contact ranges', description='Blank: automatic. Inclusive Blender frames: 1-12, 30-42')
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return (ob is not None and ob.type == 'ARMATURE' and ob.animation_data is not None and
+                ob.animation_data.action is not None and ob.animation_data.action.get('gmd_momo_kind') == 'body_motion')
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text='Blender adaptation, NOT exact game IK/OPE0', icon='INFO')
+        layout.label(text='Original Action is kept. Flat ground only.')
+        layout.prop(self, 'source_ik')
+        row = layout.row(); row.enabled = self.source_ik
+        row.prop(self, 'hands'); row.prop(self, 'feet')
+        layout.prop(self, 'foot_lock')
+        box = layout.box(); box.enabled = self.foot_lock
+        for prop in ('ground', 'height_tolerance', 'speed_limit', 'blend_frames', 'left_contacts', 'right_contacts'):
+            box.prop(self, prop)
+        box.label(text='Ranges: 1-12, 30-42. Blank = automatic detection.')
+        layout.prop(self, 'helpers')
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=530)
+
+    def execute(self, context):
+        try:
+            action = bake_body_corrections(context.object, **{name: getattr(self, name) for name in
+                ('source_ik', 'hands', 'feet', 'foot_lock', 'helpers', 'ground', 'height_tolerance',
+                 'speed_limit', 'blend_frames', 'left_contacts', 'right_contacts')})
+        except Exception as exc:
+            self.report({'ERROR'}, str(exc)); return {'CANCELLED'}
+        report = json.loads(action['gmd_body_corrections'])
+        intervals = sum(map(len, report['contacts'].values()))
+        warning = report['reach_clamps'] or (self.foot_lock and intervals == 0)
+        self.report({'WARNING'} if warning else {'INFO'},
+                    'New Action: %d contact intervals; %d reach clamps; max lock error %.5f' %
+                    (intervals, report['reach_clamps'], report['max_lock_goal_error']))
+        return {'FINISHED'}
+
+
 class BDOMAIN_PT_panel(bpy.types.Panel):
     bl_label = 'Binary Domain'
     bl_space_type = 'VIEW_3D'
@@ -1379,7 +1608,9 @@ class BDOMAIN_PT_panel(bpy.types.Panel):
                 box.label(text='%d Actions loaded' % ob.get('gmd_momo_loaded_count', 0))
             if ob.get('gmd_momo_mode') == 'decoded_body_motion':
                 box.label(text='Source body animation - press Play', icon='PLAY')
-                box.label(text='30 FPS; original timing')
+                box.label(text='Source FPS; original timing')
+                box.operator('bdomain.body_corrections', icon='CON_KINEMATIC')
+                box.label(text='Optional IK/lock; not exact game simulation')
                 box.label(text='%d supported / %d source clips' % (
                     ob.get('gmd_momo_clip_count', 0), ob.get('gmd_momo_total_clips', 0)))
             elif ob.get('gmd_momo_mode') == 'decoded_constant_body_poses':
@@ -1406,7 +1637,7 @@ def menu_export(self, context):
     self.layout.operator(BDOMAIN_OT_export_gmd.bl_idname, text='Binary Domain Model (.gmd)')
 
 
-classes = (BDOMAIN_PG_clip, BDOMAIN_UL_clips, BDOMAIN_OT_apply_selected,
+classes = (BDOMAIN_OT_body_corrections, BDOMAIN_PG_clip, BDOMAIN_UL_clips, BDOMAIN_OT_apply_selected,
            BDOMAIN_OT_refresh_clip_list, BDOMAIN_OT_cleanup_momo, BDOMAIN_OT_import_gmd, BDOMAIN_OT_export_gmd, BDOMAIN_OT_load_momo,
            BDOMAIN_OT_apply_clip, BDOMAIN_OT_preview_momo, BDOMAIN_OT_repair_skin, BDOMAIN_PT_panel)
 

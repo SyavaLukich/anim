@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.5.0
+# Binary Domain Blender addon — v0.6.0
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -197,6 +197,72 @@ simulation are not reconstructed; differing proportions may cause foot sliding.
 Topology, skin weights, rest pose and materials are not overwritten. Animation
 export to the game is not implemented.
 
+### Optional IK / foot stabilization (v0.6.0)
+
+**This is Blender-side adaptation, NOT an exact port of the game's IK,
+foot-contact controller or OPE0 procedural operators.** The raw import path
+remains unchanged. There are no live constraints, frame handlers or hidden
+changes to the GMD/rest pose.
+
+1. Apply an original `p_man` clip and select its GMD armature.
+2. Click **Bake body corrections (new Action)** in the Binary Domain panel.
+3. Choose the correction options and confirm. The new `__corrected` Action
+   becomes active. The original Action and its keys are retained.
+4. To return to the uncorrected animation, apply the original clip in the list.
+   The corrected Action remains available in Blender's Action selector.
+
+Options:
+
+- **Source anchor IK:** requires the matching source MMO. Reads MOMA `ANC0`
+  chain endpoints and the decoded source positions. Analytic two-bone solving
+  adjusts the two leg chains and, optionally, the two arm chains. Bone-head
+  distances, not Blender's short display tails, define segment lengths. Goals
+  use source motion/bind-height scaling. The spine anchor is not solved.
+  The current pose supplies the bend plane; a deterministic fallback handles
+  straight/folded chains. Unreachable goals are clamped, not stretched.
+- **Flat-ground foot lock:** an independent, optional second pass. Automatic
+  detection requires a slow ankle near the configured ground for at least
+  three frames; it is a heuristic, **not decoded game contact events**.
+  Inclusive manual ranges such as `1-12, 30-42` override automatic detection
+  separately for each foot. Blank fields select automatic detection.
+  The fixed plateau locks ankle position and orientation, with eased entry/exit.
+- **Ground height (GMD Y):** horizontal plane in armature-local, Y-up GMD
+  coordinates, normally zero. It is **not world Z** and does not raycast scene
+  meshes. The target bind ankle height provides the sole offset. Set tolerances,
+  contact speed (model units/sec) and blend frames for the specific clip.
+- **Twist/elbow/knee blend (approximate):** disabled by default. Uses `OPE0`
+  target/driver identities to blend driver deformation rotations for named
+  twist/bend helpers. This is **not the code-specific OPE0 evaluator**. Muscle,
+  sterno, shoulder-pad and other unimplemented operators are left unchanged.
+
+The result stores settings, detected/manual contact ranges, truly locked
+plateaus, helper names, reach-clamp count and maximum solver goal error in
+`gmd_body_corrections`. A warning is shown for reach clamps or no detected
+contact intervals. A clamped unreachable foot cannot be perfectly planted;
+inspect the error and adjust ground/contact ranges. Corrected Actions cannot
+be re-corrected in place: select the original clip before rebaking.
+
+Foot-lock-only baking can use an existing saved body Action without the MMO.
+Source-anchor IK verifies the source header and raw channel words against the
+Action. Existing live constraints, active drivers or active NLA tracks must be
+muted first to avoid double evaluation. No animation is exported to the game.
+Flat-plane contacts are inappropriate for stairs, uneven ground, swimming or
+wall traversal; disable foot locking or specify suitable manual contacts.
+Animation on the armature object itself is not world-space stabilized.
+
+Validation: six math tests (reach, lengths, poles, contact ranges/detection,
+plateaus and helper blending), plus a real walk bake checking every joint
+length and every frame, unchanged source keys, foot drift below 4e-6 model
+units on locked plateaus, explicit source-free locking and save/reopen.
+On the supplied scene's `s_NT_std_lp`, both feet form a locked plateau at
+frames 3–93, with zero reach clamps. The uploaded file is a compressed Blender
+scene despite its `.png` suffix. It was inspected/tested in memory only: its
+newer Blender version was **not downgraded or overwritten**.
+
+Exact game behavior still requires reconstructing terrain queries, contact
+state, joint limits, torso solving and all code-specific procedural operators.
+Do not interpret successful math/Blender tests as game-equivalence validation.
+
 ### Exact source data
 
 Each pose/motion Action keeps:
@@ -296,3 +362,5 @@ Body regression: `LD_LIBRARY_PATH=/home/user/xlibs python3 tests/test_body_retar
 Temporal tests: `tests/test_body_motion.py` (bpy + local fixtures), `tests/test_temporal_oracle.py` (optional local EXE + pefile/unicorn).
 
 Universal human-body corpus/Blender regression: `tests/test_body_universal.py` (local extracted `p_man*.mmo` fixtures; not distributed).
+
+Correction tests: `LD_LIBRARY_PATH=/home/user/xlibs python3 tests/test_body_corrections.py` (six math tests; additional fixture tests run when local game data is available).
