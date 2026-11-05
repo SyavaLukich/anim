@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 2, 1),
+    "version": (0, 2, 2),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -25,7 +25,7 @@ import math
 import mathutils
 import os
 import struct
-from bpy.props import (StringProperty, BoolProperty, IntProperty, EnumProperty)
+from bpy.props import (StringProperty, BoolProperty, IntProperty, EnumProperty, CollectionProperty)
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from . import gmd as gmd_mod
@@ -656,8 +656,7 @@ def _key_momo_basis(pb, basis, frame):
     pb.keyframe_insert(data_path='scale', frame=frame)
 
 
-# Avoid millions of FCurves when opening a large face-pose library.
-MOMO_EAGER_LIMIT = 256
+# All catalogs load one Action by default, including small libraries.
 
 
 def _momo_retarget_scale(arm, clip, rig):
@@ -707,7 +706,7 @@ def _create_momo_action(arm, clip, rig, path, bases=None):
     return act
 
 
-def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
+def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False, eager=False):
     if arm_obj.get('gmd_skinning_version') != 2:
         raise GmdExportError('Re-import GMD or use Repair old skin groups first')
     path = bpy.path.abspath(mmo_path)
@@ -723,7 +722,7 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
                              'p_gen_basic.mmo) is not implemented; this file '
                              'cannot be applied with f_man.mma.' % clips[0].header)
     rig = mmo_mod.parse_moma(open(mma_path or _default_rig_path(), 'rb').read())
-    lazy = len(clips) > MOMO_EAGER_LIMIT
+    lazy = not eager
     selected = clips[:1] if lazy else clips
     prepared = []
     for clip in selected:
@@ -731,6 +730,8 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
         scale = _momo_retarget_scale(arm_obj, clip, rig)
         prepared.append((clip, _expression_bases(
             arm_obj, clip, rig['nodes'], rig['parents'], scale)))
+    if bpy.context.screen and bpy.context.screen.is_animation_playing:
+        bpy.ops.screen.animation_cancel(restore_frame=False)
     if arm_obj.animation_data and arm_obj.animation_data.action:
         arm_obj.animation_data.action.use_fake_user = True
     action_map = {}
@@ -749,6 +750,11 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
     arm_obj['gmd_momo_scale'] = first_action['gmd_momo_scale']
     arm_obj['gmd_clips'] = json.dumps([c.name for c in clips])
     arm_obj['gmd_clip_actions'] = json.dumps(action_map)
+    arm_obj['gmd_momo_clip_count'] = len(clips)
+    arm_obj['gmd_momo_loaded_count'] = len(action_map)
+    if hasattr(arm_obj, 'bdomain_momo_clips'):
+        _refresh_clip_list(arm_obj)
+    _momo_enum_cache.clear()
     _assign_momo_action(arm_obj, first_action)
     bpy.context.scene.frame_start = 1
     bpy.context.scene.frame_end = max(1, max(c.frames for c in clips))
@@ -785,6 +791,7 @@ def _load_catalog_expression(arm, name):
     mapping = json.loads(arm['gmd_clip_actions'])
     mapping[name] = act.name
     arm['gmd_clip_actions'] = json.dumps(mapping)
+    arm['gmd_momo_loaded_count'] = len(mapping)
     return act
 
 
@@ -844,6 +851,8 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator):
     filepath: StringProperty(subtype='FILE_PATH')
     rig_mma: StringProperty(subtype='NONE',
                             description='MOMA rig with node names (default: bundled f_man.mma)')
+    eager: BoolProperty(name='Load all Actions (slow)', default=False,
+                        description='Create Actions for every clip instead of loading on selection')
     bake_euler: BoolProperty(default=False, options={'HIDDEN'})
     filter_glob: StringProperty(default='*.mmo', options={'HIDDEN'})
 
@@ -854,7 +863,7 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator):
             return {'CANCELLED'}
         try:
             n = load_momo_actions(ob, self.filepath, self.rig_mma or None,
-                                  self.bake_euler)
+                                  self.bake_euler, eager=self.eager)
         except Exception as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
@@ -916,6 +925,104 @@ class BDOMAIN_OT_apply_clip(bpy.types.Operator):
 
     def invoke(self, context, event):
         context.window_manager.invoke_search_popup(self)
+        return {'FINISHED'}
+
+
+class BDOMAIN_PG_clip(bpy.types.PropertyGroup):
+    pass  # Uses the built-in name field; stored on the armature in .blend.
+
+
+class BDOMAIN_UL_clips(bpy.types.UIList):
+    def filter_items(self, context, data, propname):
+        needle = data.bdomain_momo_filter.casefold().strip()
+        if not needle:
+            return [], []
+        flags = [self.bitflag_filter_item if needle in item.name.casefold() else 0
+                 for item in getattr(data, propname)]
+        return flags, []
+
+    def draw_item(self, context, layout, data, item, icon, active_data,
+                  active_propname, index):
+        layout.label(text=item.name, icon='ACTION')
+
+
+def _refresh_clip_list(arm):
+    arm.bdomain_momo_clips.clear()
+    for name in json.loads(arm.get('gmd_clips', '[]')):
+        arm.bdomain_momo_clips.add().name = name
+    arm.bdomain_momo_clip_index = 0
+    arm.bdomain_momo_filter = ''
+
+
+class BDOMAIN_OT_refresh_clip_list(bpy.types.Operator):
+    bl_idname = 'bdomain.refresh_clip_list'
+    bl_label = 'Show clip list (existing scene)'
+
+    def execute(self, context):
+        _refresh_clip_list(context.object)
+        return {'FINISHED'}
+
+
+class BDOMAIN_OT_apply_selected(bpy.types.Operator):
+    bl_idname = 'bdomain.apply_selected'
+    bl_label = 'Apply selected clip'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm = context.object
+        index = arm.bdomain_momo_clip_index
+        if not 0 <= index < len(arm.bdomain_momo_clips):
+            self.report({'ERROR'}, 'Select a clip in the list first')
+            return {'CANCELLED'}
+        return bpy.ops.bdomain.apply_clip(name=arm.bdomain_momo_clips[index].name)
+
+
+def _cleanup_unused_momo_actions():
+    """Never unlink an Action from an object, NLA strip or other real user."""
+    removed = 0
+    for action in list(bpy.data.actions):
+        if not (action.get('gmd_raw_momo') or action.get('gmd_momo_kind') in
+                ('constant_expression', 'generated_preview')):
+            continue
+        if action.users > int(action.use_fake_user):
+            continue
+        action.use_fake_user = False
+        bpy.data.actions.remove(action, do_unlink=False)
+        removed += 1
+    for arm in bpy.data.objects:
+        if arm.type != 'ARMATURE' or not arm.get('gmd_clip_actions'):
+            continue
+        mapping = json.loads(arm['gmd_clip_actions'])
+        mapping = {n: a for n, a in mapping.items() if bpy.data.actions.get(a)}
+        arm['gmd_clip_actions'] = json.dumps(mapping)
+        arm['gmd_momo_loaded_count'] = len(mapping)
+        if arm.get('gmd_momo_rig'):
+            arm['gmd_momo_lazy'] = True
+    return removed
+
+
+class BDOMAIN_OT_cleanup_momo(bpy.types.Operator):
+    """Delete unused imported MOMO Actions, including Fake User copies.
+
+    Edited MOMO Actions with no real users are also removed. Save a backup.
+    Active Actions and Actions used in NLA or by other objects are kept.
+    """
+    bl_idname = 'bdomain.cleanup_momo'
+    bl_label = 'Clean unused MOMO Actions'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def draw(self, context):
+        self.layout.label(text='Save a backup first. Deletes unused MOMO Actions,')
+        self.layout.label(text='including edited/Fake User copies from old imports.')
+        self.layout.label(text='Actions assigned to objects or NLA are kept.')
+        self.layout.label(text='Unloaded clips need the original MMO to load again.')
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+    def execute(self, context):
+        count = _cleanup_unused_momo_actions()
+        self.report({'INFO'}, 'Removed %d unused MOMO Actions; used Actions kept' % count)
         return {'FINISHED'}
 
 
@@ -1004,12 +1111,21 @@ class BDOMAIN_PT_panel(bpy.types.Panel):
             return
         if ob and ob.type == 'ARMATURE' and ob.get('gmd_clips'):
             lay.operator('bdomain.load_momo')
-            lay.operator('bdomain.apply_clip')
+            if len(ob.bdomain_momo_clips):
+                lay.prop(ob, 'bdomain_momo_filter', text='Filter', icon='VIEWZOOM')
+                lay.template_list('BDOMAIN_UL_clips', '', ob, 'bdomain_momo_clips',
+                                  ob, 'bdomain_momo_clip_index', rows=6)
+                lay.operator('bdomain.apply_selected', icon='PLAY')
+                lay.operator('bdomain.apply_clip', text='Search clips (popup)', icon='VIEWZOOM')
+            else:
+                lay.operator('bdomain.refresh_clip_list')
+                lay.operator('bdomain.apply_clip', text='Search clips (popup)')
+            lay.operator('bdomain.cleanup_momo', icon='TRASH')
             box = lay.box()
-            box.label(text='%d clips' % len(json.loads(ob['gmd_clips'])))
+            box.label(text='%d clips' % ob.get('gmd_momo_clip_count', len(ob.bdomain_momo_clips)))
             if ob.get('gmd_momo_lazy'):
-                box.label(text='Large library: load on selection')
-                box.label(text='%d Actions loaded' % len(json.loads(ob.get('gmd_clip_actions', '{}'))))
+                box.label(text='Load one Action on selection')
+                box.label(text='%d Actions loaded' % ob.get('gmd_momo_loaded_count', 0))
             if ob.get('gmd_momo_mode') == 'decoded_constant_expressions':
                 box.label(text='Decoded expression poses', icon='INFO')
                 box.operator('bdomain.preview_momo')
@@ -1031,13 +1147,17 @@ def menu_export(self, context):
     self.layout.operator(BDOMAIN_OT_export_gmd.bl_idname, text='Binary Domain Model (.gmd)')
 
 
-classes = (BDOMAIN_OT_import_gmd, BDOMAIN_OT_export_gmd, BDOMAIN_OT_load_momo,
+classes = (BDOMAIN_PG_clip, BDOMAIN_UL_clips, BDOMAIN_OT_apply_selected,
+           BDOMAIN_OT_refresh_clip_list, BDOMAIN_OT_cleanup_momo, BDOMAIN_OT_import_gmd, BDOMAIN_OT_export_gmd, BDOMAIN_OT_load_momo,
            BDOMAIN_OT_apply_clip, BDOMAIN_OT_preview_momo, BDOMAIN_OT_repair_skin, BDOMAIN_PT_panel)
 
 
 def register():
     for c in classes:
         bpy.utils.register_class(c)
+    bpy.types.Object.bdomain_momo_clips = CollectionProperty(type=BDOMAIN_PG_clip)
+    bpy.types.Object.bdomain_momo_clip_index = IntProperty(default=0, min=0)
+    bpy.types.Object.bdomain_momo_filter = StringProperty(name='Filter clips')
     bpy.types.TOPBAR_MT_file_import.append(menu_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_export)
 
@@ -1045,6 +1165,10 @@ def register():
 def unregister():
     bpy.types.TOPBAR_MT_file_import.remove(menu_import)
     bpy.types.TOPBAR_MT_file_export.remove(menu_export)
+    del bpy.types.Object.bdomain_momo_clips
+    del bpy.types.Object.bdomain_momo_clip_index
+    del bpy.types.Object.bdomain_momo_filter
+    _momo_enum_cache.clear()
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
 

@@ -37,12 +37,15 @@ for filename, expected in [('f_man_all.mmo', 4032), ('f_man_motionviewer.mmo', 3
     elapsed = time.perf_counter() - start
     assert len(bpy.data.actions) - before == 1
     assert len(json.loads(arm['gmd_clips'])) == expected
+    assert len(arm.bdomain_momo_clips) == expected
+    assert [c.name for c in arm.bdomain_momo_clips] == json.loads(arm['gmd_clips'])
     assert len(json.loads(arm['gmd_clip_actions'])) == 1
     print(filename, 'indexed', expected, 'clips; one Action; seconds:', elapsed, flush=True)
     # Choose an actual Fey closure when available; otherwise a non-first clip.
     names = json.loads(arm['gmd_clips'])
     name = next((n for n in names if 'fey' in n and 'eye_close' in n), names[-1])
-    assert bpy.ops.bdomain.apply_clip(name=name) == {'FINISHED'}
+    arm.bdomain_momo_clip_index = names.index(name)
+    assert bpy.ops.bdomain.apply_selected() == {'FINISHED'}
     assert len(bpy.data.actions) - before == 2
     assert arm.animation_data.action['gmd_expression'] == name
     assert bpy.ops.bdomain.apply_clip(name=name) == {'FINISHED'}
@@ -91,5 +94,45 @@ else:
     raise AssertionError('missing source accepted')
 assert arm.animation_data.action == previous
 arm['gmd_momo'] = source
-print('PASS: both catalogs, all-channel exact patches, selection, reload, body guard', flush=True)
+# Small files are lazy by default, too. Switching libraries does not silently
+# purge user data; an explicit cleanup removes old unused addon Actions.
+small = '/tmp/extract/out/f_man_pattern_fey.mmo'
+before = len(bpy.data.actions)
+assert addon.load_momo_actions(arm, small) == 95
+assert len(bpy.data.actions) == before + 1
+assert len(arm.bdomain_momo_clips) == 95
+active = arm.animation_data.action
+# Simulate old Fake User imports and an edited, assigned Action in NLA.
+for _ in range(24):
+    copy = active.copy()
+    copy.use_fake_user = True
+nla_action = active.copy()
+track = arm.animation_data.nla_tracks.new()
+track.strips.new('keep used MOMO', 1, nla_action)
+track.mute = True
+user_action = bpy.data.actions.new('user work - keep')
+user_action.use_fake_user = True
+# The default also preserves non-addon Actions with Fake User.
+before = len(bpy.data.actions)
+removed = addon._cleanup_unused_momo_actions()
+assert removed >= 24 and len(bpy.data.actions) == before - removed
+assert arm.animation_data.action == active
+assert bpy.data.actions.get(nla_action.name) == nla_action
+assert bpy.data.actions.get(user_action.name) == user_action
+assert addon._cleanup_unused_momo_actions() == 0
+names = json.loads(arm['gmd_clips'])
+name = next(n for n in names if n not in json.loads(arm['gmd_clip_actions']))
+arm.bdomain_momo_clip_index = names.index(name)
+assert bpy.ops.bdomain.apply_selected() == {'FINISHED'}
+# UIList itself uses a case-insensitive filter without reparsing JSON.
+arm.bdomain_momo_filter = 'EYE_CLOSE'
+class FilterProbe:
+    bitflag_filter_item = 1
+flags, order = addon.BDOMAIN_UL_clips.filter_items(
+    FilterProbe(), bpy.context, arm, 'bdomain_momo_clips')
+assert any(flags) and all(bool(flag) == ('eye_close' in item.name.lower())
+                           for flag, item in zip(flags, arm.bdomain_momo_clips))
+addon.unregister()
+addon.register()
+print('PASS: both catalogs, all-channel exact patches, selection, reload, body guard, small-file lazy mode, UI list, safe cleanup', flush=True)
 os._exit(0)

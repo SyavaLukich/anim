@@ -229,7 +229,7 @@ del arm_obj['gmd_skinning_version']
 assert bpy.ops.bdomain.repair_skin() == {'FINISHED'}
 assert skin_signature() == correct_skin
 assert arm_obj['gmd_skinning_version'] == 2
-assert bpy.ops.bdomain.load_momo(filepath=os.path.abspath('f_man_pattern_fey.mmo')) == {'FINISHED'}
+assert bpy.ops.bdomain.load_momo(filepath=os.path.abspath('f_man_pattern_fey.mmo'), eager=True) == {'FINISHED'}
 n = len(json.loads(arm_obj['gmd_clips']))
 clips = mmo_mod.parse_momo(open('f_man_pattern_fey.mmo', 'rb').read())
 names_ok = n == len(clips) == 95

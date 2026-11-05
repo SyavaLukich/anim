@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.2.1
+# Binary Domain Blender addon — v0.2.2
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -48,9 +48,11 @@ to image nodes. Bone palettes are **count-prefixed**: local slot zero reads
 1. In the 3D View, press **N > Binary Domain > Load MOMO clips**.
 2. Choose `f_man_pattern_fey.mmo`. Leave MOMA rig blank to use bundled
    `rigs/f_man.mma`.
-3. **Apply MOMO expression** opens a searchable list. Select e.g.
+3. A visible clip list appears in the panel. Use **Filter** to find e.g.
    `f_man_fey__eye_close`, `f_man_fey__open_a` or `f_man_fey__jaw_down`.
-   The pose now changes the face, not just custom properties.
+   Select the row and click **Apply selected clip**. The pose changes the face,
+   not just custom properties. **Search clips (popup)** remains an alternative.
+   In an older saved scene, click **Show clip list (existing scene)** first.
 4. For moving playback, click **Preview expression blend**, then press Play.
    Frames **1 → 16 → 31** blend **rest → expression → rest**.
 
@@ -69,14 +71,13 @@ not part of the verified binary encoding and not a claim of engine-identical
 retargeting for arbitrary characters. The head anchor is held at model rest;
 full-body motion/root-motion blending is outside this implementation.
 
-### Large libraries (v0.2.1)
+### Clip list and memory usage (v0.2.2)
 
 `f_man_all.mmo` contains **4032** static face poses and
 `f_man_motionviewer.mmo` contains **3990**, not time-varying performances.
-Files with more than 256 clips now load a searchable **catalog** and create
-only the first Action. Selecting a different expression decodes that clip
-and creates its Action once; selecting it again reuses the Action. Smaller
-files (including the original 95 Fey poses) retain eager import behavior.
+All files now load a searchable **catalog** and create only the first Action. Selecting a different expression decodes that clip
+and creates its Action once; selecting it again reuses the Action. This also applies to the original 95 Fey poses. The optional **Load all Actions
+(slow)** setting in the MOMO file browser restores eager import when needed.
 This avoids allocating millions of FCurves on file load. Retarget scale is
 computed separately for each selected source pose.
 
@@ -84,9 +85,22 @@ The catalog, rig metadata and loaded Actions survive saving the `.blend`.
 **Keep the original `.mmo` at its stored path**: unloaded poses still need
 that file. If the source changes or moves, load its catalog again. Already
 loaded Actions remain usable without the source. Old scenes that already
-contain thousands of Actions are not automatically purged: use a fresh model
-import/scene for the cleanest performance comparison; removing old Actions
-is left to the user to avoid deleting their work.
+contain thousands of Actions need explicit cleanup:
+
+1. Save a backup of the `.blend`.
+2. Click **Clean unused MOMO Actions** in the panel and confirm the dialog.
+3. This removes unused addon-tagged MOMO Actions, **including Fake User and
+   edited copies with no real users**. Actions assigned to objects or used
+   in NLA, and unrelated user-created Actions, are preserved.
+4. Unloaded poses can be loaded again from the original MMO. For scenes
+   imported before rig/catalog metadata was stored, reload the MMO first.
+
+Loading another MMO intentionally does not silently delete earlier work.
+The panel now draws its list from a persistent collection rather than
+repeatedly parsing the entire clip-name JSON on every redraw. Playback is
+stopped when a new catalog is loaded. These changes reduce addon overhead;
+other causes of slow viewports (modifiers, scene complexity, drivers) still
+need to be diagnosed in the affected scene.
 
 `p_gen_basic.mmo` is **not a face-pose file**. It has a single static clip,
 `p_gen_tpose`, for the 161-node `p_gen` body rig, including special helper

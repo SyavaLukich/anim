@@ -117,3 +117,19 @@ binary preservation, **not** body retargeting or a full-body pose in Blender.
 Large-library loading first reads metadata without allocating channel objects.
 Only the selected clip is decoded. The original file remains external; loaded
 Actions and rig metadata persist in `.blend`, but unloaded clips require it.
+
+## v0.2.2 Blender catalog UI and lifecycle
+
+All libraries now default to on-demand Actions, including the 95-pose file.
+The optional eager operator setting / `load_momo_actions(..., eager=True)`
+retains batch import for the original all-Actions persistence regression.
+The panel uses a persistent per-armature collection and case-insensitive
+filter, with an explicit Apply selected clip button, not only an invoke-only
+search popup. It avoids repeatedly deserializing the catalog on redraw.
+
+Old imported Actions remain until explicit cleanup. Cleanup removes only
+addon-tagged Actions whose users consist solely of Fake User (or no users);
+it never unlinks an object/NLA user and leaves unrelated user Actions alone.
+The confirmation explicitly warns that edited unused MOMO copies are included.
+Tests cover this distinction, list selection/filtering, small-file lazy loading,
+and unregister/register lifecycle in addition to the large-file tests.
