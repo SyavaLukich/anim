@@ -228,3 +228,82 @@ Baked Actions use continuous quaternion signs and LINEAR native-frame keys,
 bulk-filled FCurves rather than millions of per-frame keyframe_insert calls.
 Subframe playback between the integer-frame bake keys is Blender interpolation,
 not a claim of exact engine subframe SLERP.
+
+## v0.5.0 general p_man libraries (supersedes the two-idle restriction)
+
+All 116 `p_man*.mmo` archive members were examined: 106 contain 19,739 RAW0
+entries (6,765 distinct names, with repeats in aggregate libraries); 10 contain
+no embedded clips. All entries decode and map to the MOMA at three source
+times. Channel-count distribution: 19,682 × 85, 54 × 55, 3 × 54.
+MTS0's two padded u16-length strings name the library and the required MOMA;
+rig selection uses that declaration, not animation filenames or clip names.
+
+Additional temporal codecs (opcodes below omit the 00/01 time-rate prefix):
+
+| Codec | Header after opcode/count | Times / values |
+|---|---|---|
+| 21 / 22 | s16 base, u16 scale/divisor | dense signed-byte / signed-short samples |
+| 23 / 24 | same as 21 | byte/u16 sparse times, signed-byte values |
+| 2D | none | dense f32 scalar samples |
+| 63 | 4 s16 bases, 4 u16 ranges | dense packed u32 quaternion samples |
+| 69 | s16 base, u16 range, 3 s16 axis | dense s16 angular samples |
+| 61 | none | dense 3 u16 Euler turns, discard low bit before half-angle |
+| 6D | none | dense 3 f32 Euler radians, quaternion = Qz * Qy * Qx |
+| 25 / 27 / 2A / 2C | u16 pool count, s16 base, u16 scale/divisor, u16 flags | run tables; signed byte / byte / short / short pool |
+| 66 / 68 | u16 pool count, 4 s16 bases, 4 u16 ranges, u16 flags | run tables, packed u32 quaternion pool |
+| 6C | u16 pool count, s16 base, u16 range, 3 s16 axis, u16 flags | run tables, s16 angular pool |
+
+Dense sample times are 0,1,...,count-1 before the opcode time-rate multiplier.
+Byte scalars use base/16384 + signedSample * unsignedScale/(16384*256),
+**not** the short scalar base/32 + sample/divisor formula. Both time and value
+byte arrays are individually padded to an even byte count. 61 half-angles are
+(u16 >> 1) * pi/32768; 6D half-angles are f32/2.
+
+Run compression is **not a Hermite/Bézier spline**. Three arrays of `count`
+entries hold start times, pool offsets, and run lengths. Flags bits 0/1/2
+independently choose u16 instead of padded byte storage for each array.
+Scalar flag bit 3 selects byte rather than short pool entries. Each run emits
+consecutive sample times `start+j` from `pool[offset+j]`. Across gaps, the last
+sample of one run interpolates to the first of the next. Reject zero-length,
+overlapping runs, pool overruns and invalid flags. Header sizes including
+opcode/count are scalar 12, packed quaternion 24, fixed-axis 18 bytes.
+Loaders D8B091..D8B43F; wrappers D8B9E0, D8D3A0, D911E0; representative
+kernels 409960, 40BFD0, 40DE40. All eight width combinations were checked.
+
+Dense quaternion interpolation differs from sparse/run interpolation. EXE
+D91590, D912E0, D90E50 and D90A60 use normalized adjusted lerp, with dot=d,
+k=-0.39936140179634094*d+0.5069268941879272 and
+u=t+k*t*(2*t*t-3*t+1), then normalize(a+u*(sign(d)*b-a)).
+The constants at 03087CF0/03087D00 are BSS vectors initialized by F86780 and
+F867A0 from 011CEEC0/011CEEC4. An oracle must initialize these vectors;
+leaving BSS zero silently tests a different interpolant. Sparse/run kernels
+use shortest-path SLERP. Blender bakes source integer frames and uses its own
+linear component interpolation between those bake keys.
+
+**Global motion:** moo_centroid is a separate NOD3 root; center_c_n also has
+parent=-1. Flag-65 transforms are absolute in animation-model space, not
+already in centroid-transformed scene space. Compose the skeletal hierarchy
+first, then apply the centroid SRT to all other evaluated nodes. This retains
+walking travel and turn yaw. Anchor horizontal translation to the first source
+world center, but use the MOMA center bind height for vertical displacement
+and height scale (using a crouched initial height loses the crouch and distorts
+travel). The three leading auxiliary scalar channels are often nonzero
+(e.g. 0,6,5); preserve their source timelines, but do not interpret them as XYZ
+translation. PRG2 is preserved opaquely, not mistaken for an omission bitmask.
+
+A 55-channel prefix ends before all 30 rotation-only finger channels. These
+omitted target nodes inherit their target parent's deformation, retaining
+bind offsets. The three 54-channel p_tpose entries additionally omit the final
+weapon quaternion, defaulted to identity while retaining its XYZ channels.
+Other incomplete node layouts remain errors; no arbitrary channel realignment.
+
+Optional executable oracle: 1,055 real-data evaluations, max absolute component
+error 2.665261514711581e-6; 448 synthetic evaluations cover all table-width
+flags, >255 pool offsets, and segment gaps (including byte scalar variants).
+Another 70 synthetic scalar evaluations check 21/22/23/24/2D, odd byte padding
+and both full/half-rate time flags.
+Blender regression: all 203 p_man_fay_whan clips at 609 times, plus actual
+native Actions for idle/walk/turn/55-channel motion, the 54-channel T-pose,
+float/packed Euler motion, root travel/yaw, lengths, and saved Action reuse.
+This does not establish engine-equivalent IK/procedural controls, animation
+blending, every nonhuman MOMA, or game-side animation export.

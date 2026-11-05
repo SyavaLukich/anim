@@ -150,6 +150,74 @@ class ConstantChannels(unittest.TestCase):
             mmo.write_track_values(data, c, [math.inf, tracks[1].value])
         self.assertEqual(data, original)
 
+    def test_dense_scalar_and_padding(self):
+        for code in (0x21, 0x22):
+            vals = (-100, 0, 100)
+            payload = struct.pack('>HHhH', code, 3, -32, 128)
+            payload += struct.pack('>3b', *vals)+b'\0' if code == 0x21 else struct.pack('>3h', *vals)
+            tracks, data = self.parse(payload)
+            t = tracks[0]
+            self.assertEqual(t.times, [0, 1, 2])
+            expected = (-32/16384+100*128/(16384*256)) if code == 0x21 else -1+100/128
+            self.assertAlmostEqual(mmo.sample_track(t, 2), expected)
+            self.assertEqual(mmo.sample_track(t, 20), expected)
+            c = mmo.Clip(); c.tracks = tracks
+            before = data[:]; mmo.write_track_values(data, c, [t.value])
+            self.assertEqual(data, before)
+        tracks, _ = self.parse(struct.pack('>HH3f', 0x2d, 3, 0, -1, 3))
+        self.assertAlmostEqual(mmo.sample_track(tracks[0], 1.5), 1)
+
+    def test_all_run_flags_gaps_and_bounds(self):
+        for code in (0x25, 0x27, 0x2a, 0x2c):
+            byte = code in (0x25, 0x27)
+            for bits in range(8):
+                flags = bits | (8 if byte else 0)
+                payload = struct.pack('>HHHhHH', code, 2, 4, 0, 128, flags)
+                for bit, values in enumerate(((0, 5), (0, 2), (2, 2))):
+                    payload += struct.pack('>2'+('H' if bits & (1<<bit) else 'B'), *values)
+                payload += struct.pack('>4'+('b' if byte else 'h'), 0, 10, 30, 40)
+                t = self.parse(payload)[0][0]
+                self.assertEqual(t.times, [0, 1, 5, 6])
+                self.assertAlmostEqual(mmo.sample_track(t, 3), (t.samples[1]+t.samples[2])/2)
+                self.assertEqual(mmo.sample_track(t, 100), t.samples[-1])
+                # Each segment must stay inside the value pool.
+                bad = bytearray(payload)
+                # Last length is located before the four value entries.
+                width = 2 if bits & 4 else 1
+                pos = len(payload)-4*(1 if byte else 2)-width
+                bad[pos:pos+width] = (99).to_bytes(width, 'big')
+                with self.assertRaisesRegex(ValueError, 'run exceeds'):
+                    self.parse(bad)
+
+    def test_dense_euler_codecs(self):
+        for code, fmt, xyz in ((0x61, '3H', (2000, 4000, 6000)),
+                                (0x6d, '3f', (.2, .3, .4))):
+            t = self.parse(struct.pack('>HH'+fmt, code, 1, *xyz))[0][0]
+            self.assertAlmostEqual(sum(v*v for v in t.value), 1)
+            self.assertEqual(mmo.sample_track(t, 100), t.value)
+        t = self.parse(struct.pack('>HH3f', 0x6d, 1, .2, .3, .4))[0][0]
+        for own, native in zip(t.value, (.0672042668, .1653387547, .1808355749, .9671841860)):
+            self.assertAlmostEqual(own, native, places=6)
+
+    def test_partial_tail_mapping(self):
+        tracks, _ = self.parse(b'\0\x2e'*3, 3)
+        c = mmo.Clip(); c.tracks = tracks
+        rig = {'channel_indices': [0, 1, 2, 3, 4], 'node_flags': [1, 0],
+               'node_offsets': [0, 4], 'rest_positions': [(0, 0, 0)]*2}
+        with self.assertRaises(ValueError):
+            mmo.pose_nodes(c, rig)
+        self.assertEqual(mmo.pose_nodes(c, rig, allow_missing_tail=True),
+                         [((0, 0, 0), (0, 0, 0, 1)), None])
+
+    def test_mts_rig_declaration(self):
+        payload = struct.pack('>H', 4)+b'lib\0'+struct.pack('>H', 6)+b'p_man\0'
+        data = b'MOMO'+bytes(12)+b'MTS0'+struct.pack('>I', len(payload)+8)+payload
+        self.assertEqual(mmo.momo_rig_name(data), 'p_man')
+        self.assertIsNone(mmo.momo_rig_name(b'MOMO'+bytes(12)))
+        with self.assertRaises(ValueError):
+            mmo.momo_rig_name(
+                b'MOMO'+bytes(12)+b'MTS0'+struct.pack('>I', 10)+b'\0\xff')
+
 
 if __name__ == '__main__':
     unittest.main()

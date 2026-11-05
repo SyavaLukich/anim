@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.4.0
+# Binary Domain Blender addon — v0.5.0
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -69,8 +69,8 @@ of the head. A recorded, automatically estimated uniform scale adapts source
 head height to the imported GMD. This retarget scale is a model adaptation,
 not part of the verified binary encoding and not a claim of engine-identical
 retargeting for arbitrary characters. The head anchor is held at model rest;
-the body retargeter below supports the static p_gen T-pose and two verified
-p_man idle animations. General body/root-motion blending is not implemented.
+the body retargeter below supports the static p_gen T-pose and general
+p_man body-motion libraries. Engine animation blending is not implemented.
 
 ### Clip list and memory usage (v0.2.2)
 
@@ -130,51 +130,72 @@ Loaded Actions themselves survive save/reopen without the source files.
 
 Validated on all five supplied Fey variants, including visible mesh movement,
 horizontal bilateral arms, every parent-offset length, finite geometry and
-save/reopen. Body animations other than the two verified idles below, nonzero reserved controls,
-engine procedural-node simulation, and game-side export of this retargeted
-body pose are **not validated/supported by this new body path**. A partial
+save/reopen. Engine procedural-node simulation and game-side export of
+retargeted animation are **not supported**. Nonzero p_gen reserved controls
+remain unsupported; p_man auxiliary controls are preserved separately. A partial
 skeleton missing required body joints or a mismatched MOMA fails explicitly.
 
-### Real body animation (v0.4.0)
+### General human body animation (v0.5.0)
 
-The existing `motion.par` contains **`p_man_adventure.mmo`**. Two genuine
-body idle animations are now supported:
+Load **`p_man_fay_whan.mmo`**, `p_man_adventure.mmo`, or another `p_man`
+library on the imported GMD armature, leaving the MOMA field blank. The
+MTS0 rig declaration selects bundled **`p_man.mma`** automatically. There is
+**no clip-name/duration allowlist**: all **203/203** clips in
+`p_man_fay_whan.mmo` and **40/40** in `p_man_adventure.mmo` are exposed.
+Choose a clip in the filtered list, click **Apply selected clip**, then Play.
+Do not use the generated facial-preview button for body animation.
 
-| Clip | Source duration | Source rate | Blender keys |
-|---|---:|---:|---:|
-| `p_Wnon_std_nml` | 80 frame intervals | 30 FPS | 1–81 |
-| `p_Wnon_std_nml_01` | 200 frame intervals | 30 FPS | 1–201 |
+The first Action loads immediately; others are decoded/baked once on selection
+and cached. Source frame 0 maps to Blender frame 1, including the duration
+endpoint. FPS comes from HED0 (30 throughout the tested corpus); positive
+source speed is retained via FPS base. For example, `s_Whan_walkA_slow_f`
+bakes frames 1–51 and `s_Whan_std_a_turnL180` frames 1–36.
+Native-frame keys use bulk FCurve writes and continuous quaternion signs.
+Between baked integer frames Blender interpolates linearly in channel space;
+exact arbitrary-subframe engine playback is not claimed.
 
-Load this `.mmo` on the GMD armature, leaving the MOMA field blank. Bundled
-**`p_man.mma`** is selected automatically. The first idle loads immediately;
-select the longer idle in the panel and click **Apply selected clip**, then
-press **Play**. The scene rate is set to the source 30 FPS. Source frame 0
-maps to Blender frame 1, including the source endpoint at 80/200. These are
-actual source-motion samples, **not** the generated facial preview.
+Supported compression includes constant, dense, sparse, and segmented-run
+scalar/quaternion channels, packed and float Euler rotations, and fixed-axis
+rotations. Dense rotation curves use the game's cubic-adjusted normalized
+interpolant, not an assumed exact SLERP. Sparse/run curves use shortest-path
+SLERP. Original raw words, HED0, PRG2 and the three auxiliary scalar timelines
+are retained in Action properties. Auxiliary values are **not guessed to be
+XYZ travel** or used to simulate engine procedural controls.
 
-Only **2 of the 40 clips** in this file are enabled, and the panel says so.
-Other clips use additional unimplemented codecs and are not advertised as
-supported. This is body idle movement, not walking/running support.
-Each selected motion is baked once at native-frame resolution using bulk
-FCurve writes and cached as an Action. The other motion remains unloaded.
-At native integer frames it follows decoded scalar/SLERP source curves;
-Blender's interpolation between those baked frames is linear in channel space.
+The separate **`moo_centroid`** supplies locomotion and global yaw. It is
+composed with the model-space skeleton after resolving the MOMA hierarchy
+and world-space flags. Horizontal origin is relative to the first source
+frame; vertical position is relative to the MOMA bind height, preserving
+crouches and airborne motion. Motion scale uses bind height, not the possibly
+crouched first-frame height. Target bone lengths/proportions remain unchanged.
+Full 85-channel clips and truncated 55-/54-channel prefixes are supported:
+missing finger channels retain target bind offsets and inherit wrist motion;
+the 54-channel T-pose also omits the final weapon quaternion (identity).
+No missing finger animation is invented.
 
-The 79-node body rig has rotation-only nodes, default local positions from
-NDT0, procedural nodes, and absolute/world-space nodes (flag `0x40`). The
-retargeter handles these separately rather than using the facial layout.
-Target lengths are retained. Root translation is relative to the first source
-pose and scaled to target height; auxiliary travel controls must remain zero
-for these verified clips. Engine IK, foot locking, procedural helper simulation
-and exact generic-rig end-effector positions are not reconstructed. Imported
-skin weights, topology, rest pose and materials remain unchanged.
+**Coverage:** all 19,739 clip entries (6,765 distinct names, including repeated
+aggregate libraries) from **106 nonempty `p_man*.mmo` libraries** in the local
+`motion.par` decode and map onto the source rig at three sample times. Ten
+other files contain no embedded RAW0 clips. All 203 Fey handgun clips were
+retargeted onto the naked Fey model at start/middle/end, checking finite
+transforms and every parent-offset length. Baked idle, 180-degree turn,
+walking, and 55-channel Actions match direct evaluation. Walking root travel,
+turn yaw, 54-channel T-pose, Euler codecs and save/reopen are tested separately.
+The historical two-idle/five-model and static/face/GMD tests remain regressions.
 
-Both clips were tested on all five Fey variants for real mesh movement,
-frame-by-frame transform agreement at sample frames, preserved parent-offset
-lengths, 30 FPS, save/reopen and reuse without source files. An optional x86
-emulator test compares 336 curve evaluations with the game's isolated math
-kernels: maximum observed error **4.74e-6**. The game binary and emulator are
-not required at addon runtime or included in the addon.
+An optional Unicorn executable oracle verifies **1,055 real-data evaluations**
+(maximum error **2.67e-6**) plus **448 synthetic run-table evaluations** across
+all eight width-flag combinations, wide offsets and gaps, plus **70 synthetic
+scalar evaluations** for byte padding, sparse times and both time rates. This is mathematical
+kernel validation, not an engine screenshot comparison. Game files and emulator
+packages are not shipped or required at runtime.
+
+This is general **human `p_man`** support, not a claim to support every creature,
+robot, custom rig, or every possible MMO encoding. Unknown layouts/codecs fail
+explicitly. Engine IK, foot locking, animation blending and procedural helper
+simulation are not reconstructed; differing proportions may cause foot sliding.
+Topology, skin weights, rest pose and materials are not overwritten. Animation
+export to the game is not implemented.
 
 ### Exact source data
 
@@ -212,7 +233,7 @@ constant quaternion, **not Bezier handles**. The former 139-track interpretation
 was incorrect. Every one of the 95 supported clips now consumes its TRK2
 payload exactly, as 184 correctly typed channels.
 
-Unknown/time-varying channel opcodes are rejected clearly; they are not
+Unknown channel opcodes are rejected clearly; they are not
 guessed or silently converted into static poses. See `docs/MOMO_FORMAT.md`
 for reverse-engineering evidence and scope.
 
@@ -273,3 +294,5 @@ Windows GUI/filesystem behavior has not been exercised in this Linux sandbox.
 Body regression: `LD_LIBRARY_PATH=/home/user/xlibs python3 tests/test_body_retarget.py` (local game fixtures, not distributed).
 
 Temporal tests: `tests/test_body_motion.py` (bpy + local fixtures), `tests/test_temporal_oracle.py` (optional local EXE + pefile/unicorn).
+
+Universal human-body corpus/Blender regression: `tests/test_body_universal.py` (local extracted `p_man*.mmo` fixtures; not distributed).

@@ -17,7 +17,7 @@ def main():
     data = Path(path).read_bytes()
     rig = mmo.parse_moma(Path('/tmp/motion_samples/p_man.mma').read_bytes())
     clips = {c.name: c for c in mmo.parse_momo(data, decode_tracks=False)
-             if c.name in addon.BODY_MOTION_CLIPS}
+             if c.name in ('p_Wnon_std_nml', 'p_Wnon_std_nml_01')}
     assert {n: c.frames for n, c in clips.items()} == {'p_Wnon_std_nml': 80, 'p_Wnon_std_nml_01': 200}
     for c in clips.values():
         assert c.fps == 30
@@ -28,9 +28,9 @@ def main():
     for model in sorted(Path('/tmp/extract/out').glob('c_awmn_fey*.gmd')):
         bpy.ops.wm.read_factory_settings(use_empty=True)
         addon.load_gmd(bpy.context, str(model)); arm = bpy.context.object
-        assert addon.load_momo_actions(arm, path) == 2
+        assert addon.load_momo_actions(arm, path) == 40
         assert len(bpy.data.actions) == 1  # no eager baking of both motions
-        assert len(arm.bdomain_momo_clips) == 2
+        assert len(arm.bdomain_momo_clips) == 40
         assert arm['gmd_momo_total_clips'] == 40
         assert bpy.context.scene.frame_end == 81
         mesh = next(o for o in bpy.data.objects if o.type == 'MESH' and len(o.data.vertices) > 500)

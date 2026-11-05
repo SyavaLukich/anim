@@ -6,7 +6,7 @@ TRK2: u32 channel count; face node: scalar X, Y, Z, quaternion XYZW.
 0162 stores 4 signed normalized shorts; 016e is an identity quaternion.
 The 00-prefixed variants are supported too; 002e is a zero scalar.
 The Fey pattern corpus contains 95 static expression poses (184 channels each).
-Verified sparse scalar/quaternion/axis-angle curves are supported.
+Dense, sparse, segmented-run and Euler rotation curves are supported.
 Other animated channel opcodes are rejected, not guessed. See README.
 """
 import struct
@@ -45,6 +45,28 @@ def _read_chunks(data, off, end):
         out.append((m, off, ln))
         off += ln
     return out
+
+
+def momo_rig_name(data):
+    """Read the declared MOMA name, independent of clip names/channel count."""
+    if data[:4] != b'MOMO':
+        raise ValueError('not a MOMO file')
+    for magic, off, length in _read_chunks(data, 16, len(data)):
+        if magic != b'MTS0':
+            continue
+        p, end = off+8, off+length
+        names = []
+        for _ in range(2):
+            if p+2 > end:
+                raise ValueError('truncated MTS0 name')
+            n = struct.unpack_from('>H', data, p)[0]
+            p += 2
+            if not n or p+n > end:
+                raise ValueError('invalid MTS0 name length')
+            names.append(_cstr(data[p:p+n]))
+            p += n+n%2
+        return names[1]
+    return None
 
 
 def parse_momo(data, decode_tracks=True):
@@ -101,6 +123,24 @@ def decode_clip(data, clip):
     return clip
 
 
+def _quat_dense_lerp(a, b, t):
+    """Game's normalized cubic-adjusted lerp (fast SLERP approximation).
+
+    Constants are initialized by EXE f86780/f867a0; using exact SLERP here
+    subtly disagrees with dense/half-rate channels at integer Blender frames.
+    """
+    import math
+    dot = sum(x*y for x, y in zip(a, b))
+    k = -.39936140179634094*dot + .5069268941879272
+    f = t + k*t*(2*t*t-3*t+1)
+    sign = -1 if dot < 0 else 1
+    q = tuple(x + f*(sign*y-x) for x, y in zip(a, b))
+    norm = math.sqrt(sum(v*v for v in q))
+    if norm < 1e-8:
+        raise ValueError('zero curve quaternion')
+    return tuple(v/norm for v in q)
+
+
 def _quat_slerp(a, b, t):
     import math
     na = math.sqrt(sum(v*v for v in a)); nb = math.sqrt(sum(v*v for v in b))
@@ -132,59 +172,121 @@ def sample_track(track, frame):
     f = (time-track.times[i])/(track.times[i+1]-track.times[i])
     a, b = track.samples[i:i+2]
     if track.kind == 'quaternion':
+        if track.opcode & 255 in (0x61, 0x63, 0x69, 0x6d):
+            return _quat_dense_lerp(a, b, f)
         return _quat_slerp(a, b, f)
     return a + f*(b-a)
 
 
 def _parse_curve(data, start, end):
-    """Verified sparse linear scalar / smallest-three / fixed-axis curves.
+    """Dense, sparse and run-compressed scalar/quaternion channels.
 
-    Loader D8B122/D8B37E/D8B5A1; evaluators 409590/40BAC0/40D9B0.
-    Keep the full serialized words separately; temporal edits are unsupported.
+    Run tables store start times, value-pool offsets and run lengths. They
+    are not spline tangents: samples within a run are one time unit apart.
     """
     import math
     opcode, count = struct.unpack_from('>2H', data, start)
     code = opcode & 255
-    header = 8 if code in (0x28, 0x29) else 20 if code in (0x64, 0x65) else 14
-    short_times = code in (0x29, 0x65, 0x6b)
-    time_size = count*2 if short_times else count + count % 2
-    width = header + time_size + count*(4 if code in (0x64, 0x65) else 2)
-    if count == 0 or start + width > end:
-        raise ValueError('truncated/empty MOMO curve at 0x%x' % start)
-    times = list(struct.unpack_from('>%d%s' % (count, 'H' if short_times else 'B'),
-                                    data, start+header))
-    if any(b <= a for a, b in zip(times, times[1:])):
-        raise ValueError('non-increasing MOMO curve times')
-    p = start+header+time_size
-    t = Track(); t.opcode = opcode; t.offset = start; t.times = times
-    if code in (0x28, 0x29):
-        base, divisor = struct.unpack_from('>hH', data, start+4)
-        if divisor == 0:
-            raise ValueError('zero curve scalar divisor')
+    scalar = code < 0x60
+    byte_values = code in (0x21, 0x23, 0x24, 0x25, 0x27)
+    packed = code in (0x63, 0x64, 0x65, 0x66, 0x68)
+    segmented = code in (0x25, 0x27, 0x2a, 0x2c, 0x66, 0x68, 0x6c)
+    dense = code in (0x21, 0x22, 0x2d, 0x61, 0x63, 0x69, 0x6d)
+    header = (4 if code in (0x2d, 0x61, 0x6d) else
+              (12 if segmented else 8) if scalar else
+              (24 if segmented else 20) if packed else
+              (18 if segmented else 14))
+    if start + header > end or count == 0:
+        raise ValueError('truncated/empty MOMO curve header at 0x%x' % start)
+    pool_count = struct.unpack_from('>H', data, start+4)[0] if segmented else count
+    value_size = 6 if code == 0x61 else 12 if code == 0x6d else 4 if packed or code == 0x2d else 1 if byte_values else 2
+    p = start+header
+
+    def array(n, short):
+        nonlocal p
+        size = n*2 if short else n+n%2
+        if p+size > end:
+            raise ValueError('truncated MOMO curve table')
+        vals = list(struct.unpack_from('>%d%s' % (n, 'H' if short else 'B'), data, p))
+        p += size
+        return vals
+
+    if segmented:
+        flags = struct.unpack_from('>H', data, start+header-2)[0]
+        if flags & ~(15 if scalar else 7) or (scalar and bool(flags & 8) != byte_values):
+            raise ValueError('invalid MOMO run table flags')
+        starts = array(count, flags & 1)
+        offsets = array(count, flags & 2)
+        lengths = array(count, flags & 4)
+    elif dense:
+        times = list(range(count))
+    else:
+        times = array(count, code in (0x24, 0x29, 0x65, 0x6b))
+    size = pool_count*value_size
+    width = p-start+size+(size % 2)
+    if pool_count == 0 or start+width > end:
+        raise ValueError('truncated/empty MOMO curve values at 0x%x' % start)
+    t = Track(); t.opcode = opcode; t.offset = start
+    shift = 6 if segmented else 4
+    if scalar:
         t.kind = 'scalar'
-        t.samples = [base/32 + v/divisor for v in struct.unpack_from('>%dh' % count, data, p)]
-    elif code in (0x64, 0x65):
-        base = struct.unpack_from('>4h', data, start+4)
-        scale = struct.unpack_from('>4H', data, start+12)
-        t.kind = 'quaternion'; t.samples = []
-        for word in struct.unpack_from('>%dI' % count, data, p):
+        if code == 0x2d:
+            pool = list(struct.unpack_from('>%df' % pool_count, data, p))
+        else:
+            base, scale = struct.unpack_from('>hH', data, start+shift)
+            vals = struct.unpack_from('>%d%s' % (pool_count, 'b' if byte_values else 'h'), data, p)
+            if byte_values:
+                pool = [base/16384 + v*scale/(16384*256) for v in vals]
+            else:
+                if scale == 0:
+                    raise ValueError('zero curve scalar divisor')
+                pool = [base/32+v/scale for v in vals]
+    elif code in (0x61, 0x6d):
+        t.kind = 'quaternion'; pool = []
+        for xyz in struct.iter_unpack('>3H' if code == 0x61 else '>3f', data[p:p+size]):
+            x, y, z = [((v >> 1)*math.pi/16384) for v in xyz] if code == 0x61 else xyz
+            if not all(math.isfinite(v) for v in (x, y, z)):
+                raise ValueError('non-finite MOMO Euler sample')
+            sx, sy, sz = (math.sin(v/2) for v in (x, y, z))
+            cx, cy, cz = (math.cos(v/2) for v in (x, y, z))
+            pool.append((sx*cy*cz-cx*sy*sz, cx*sy*cz+sx*cy*sz,
+                         cx*cy*sz-sx*sy*cz, cx*cy*cz+sx*sy*sz))
+    elif packed:
+        t.kind = 'quaternion'; pool = []
+        base = struct.unpack_from('>4h', data, start+shift)
+        scale = struct.unpack_from('>4H', data, start+shift+8)
+        for word in struct.unpack_from('>%dI' % pool_count, data, p):
             omitted = word & 3
-            packed = [(word >> shift) & 1023 for shift in (22, 12, 2)]
+            values = [(word >> bit) & 1023 for bit in (22, 12, 2)]
             q = [0.0]*4; j = 0
             for axis in range(4):
                 if axis != omitted:
-                    q[axis] = base[axis]/32768 + packed[j]/1024 * scale[axis]/32768
+                    q[axis] = base[axis]/32768+values[j]/1024*scale[axis]/32768
                     j += 1
             q[omitted] = math.sqrt(max(0, 1-sum(v*v for v in q)))
-            t.samples.append(tuple(q))
+            pool.append(tuple(q))
     else:
-        base, scale, x, y, z = struct.unpack_from('>hH3h', data, start+4)
-        t.kind = 'quaternion'; t.samples = []
-        for v in struct.unpack_from('>%dh' % count, data, p):
-            half_angle = (base/32767 + v/32767 * scale/32767) * math.pi/2
-            s = math.sin(half_angle)
-            t.samples.append((x/32767*s, y/32767*s, z/32767*s, math.cos(half_angle)))
-    t.value = t.samples[0]
+        t.kind = 'quaternion'; pool = []
+        base, scale, x, y, z = struct.unpack_from('>hH3h', data, start+shift)
+        for v in struct.unpack_from('>%dh' % pool_count, data, p):
+            angle = (base/32767+v/32767*scale/32767)*math.pi/2
+            s = math.sin(angle)
+            pool.append((x/32767*s, y/32767*s, z/32767*s, math.cos(angle)))
+    if segmented:
+        times, samples = [], []
+        for first, off, length in zip(starts, offsets, lengths):
+            if length == 0 or off+length > pool_count:
+                raise ValueError('MOMO run exceeds its sample pool')
+            times.extend(range(first, first+length))
+            samples.extend(pool[off:off+length])
+    else:
+        samples = pool
+    if any(b <= a for a, b in zip(times, times[1:])):
+        raise ValueError('overlapping/non-increasing MOMO curve times')
+    if t.kind == 'scalar' and not all(math.isfinite(v) for v in samples):
+        raise ValueError('non-finite MOMO curve values')
+    t.times, t.samples = times, samples
+    t.value = samples[0]
     t.words = struct.unpack_from('>%dH' % (width//2), data, start)
     return t, width
 
@@ -208,7 +310,8 @@ def _parse_tracks(data, off, ln):
         opcode = struct.unpack_from('>H', data, p)[0]
         widths = {0x20: 8, 0x2e: 2, 0x62: 10, 0x6e: 2}
         code = opcode & 0xff
-        if opcode >> 8 in (0, 1) and code in (0x28, 0x29, 0x64, 0x65, 0x6a, 0x6b):
+        if opcode >> 8 in (0, 1) and code in (0x21, 0x22, 0x23, 0x24, 0x25, 0x27, 0x28, 0x29, 0x2a, 0x2c, 0x2d,
+                                                0x61, 0x63, 0x64, 0x65, 0x66, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d):
             if p + 4 > end:
                 raise ValueError('truncated curve header')
             t, width = _parse_curve(data, p, end)
@@ -216,7 +319,7 @@ def _parse_tracks(data, off, ln):
             continue
         if opcode >> 8 not in (0, 1) or code not in widths:
             raise ValueError('unsupported MOMO channel opcode 0x%04x at 0x%x; '
-                             'only verified constant/sparse channel codecs are supported'
+                             'unsupported channel compression (not a known constant/dense/sparse/run codec)'
                              % (opcode, p))
         width = widths[code]
         if p + width > end:
@@ -246,7 +349,7 @@ def _parse_tracks(data, off, ln):
     return tracks, count
 
 
-def pose_nodes(clip, rig=None, frame=0):
+def pose_nodes(clip, rig=None, frame=0, allow_missing_tail=False):
     """Decode node transforms, honoring NOD3 indirection when a rig is supplied.
 
     p_gen reserves channels 0..7 outside the node table. Flag-6 procedural
@@ -272,6 +375,16 @@ def pose_nodes(clip, rig=None, frame=0):
     for ni, ids in enumerate(groups):
         if ids is None:
             nodes.append(None)
+            continue
+        if allow_missing_tail and all(i >= len(clip.tracks) for i in ids):
+            nodes.append(None)
+            continue
+        if (allow_missing_tail and len(ids) == 4 and
+                ids[-1] == len(clip.tracks) and all(i < len(clip.tracks) for i in ids[:3])):
+            group = [clip.tracks[i] for i in ids[:3]]
+            if any(t.kind != 'scalar' for t in group):
+                raise ValueError('unexpected MOMO partial node layout')
+            nodes.append((tuple(sample_track(t, frame) for t in group), (0, 0, 0, 1)))
             continue
         if any(i < 0 or i >= len(clip.tracks) for i in ids):
             raise ValueError('MOMA channel index exceeds MOMO channel count')
