@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 1, 1),
+    "version": (0, 1, 2),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -204,6 +204,15 @@ def load_gmd(context, filepath, import_momo=None, rig_mma=None, bake_euler=False
         # raw preservation + normals + uv + skin
         s = g.streams[m.stream]
         stride = s['stride']
+        # UV-less, texture-less records are auxiliary draw geometry, not a
+        # second visible surface. Keep objects available for lossless export.
+        has_texture = (0 <= m.material < len(g.materials) and any(
+            0 <= t < len(g.textures) for t in g.materials[m.material]['tex']))
+        auxiliary = stride == 20 and not has_texture
+        ob['gmd_auxiliary'] = auxiliary
+        if auxiliary:
+            ob.hide_set(True)
+            ob.hide_render = True
         need_nb = stride >= 32
         ws = []
         bis = []

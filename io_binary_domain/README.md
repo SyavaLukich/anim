@@ -102,3 +102,16 @@ MOMO = `MOMO` + clip containers `RAW0{HED0,HED1,PRG2,TRK2}`; TRK2 holds
 `46·3+1` one-key tracks per clip separated by `0x7fff`; key kinds:
 `{v,0120,t}`, `{v,016e,0120,t}`, `{v,0162,4×handle,0120,t}`; values are
 10-bit (0..1023).
+
+## Overlapping draw geometry (v0.1.2)
+
+The source files contain overlapping draw records, not just one clean surface.
+UV-less (20-byte stride), texture-less records are now hidden in the viewport
+and render by default, but remain in the scene for byte-identical export.
+They have `gmd_auxiliary = True`; unhide them in the Outliner for inspection.
+Their precise engine pass (for example shadow/depth) is not yet confirmed.
+Other overlaps are retained: coincident positions do not imply identical UVs,
+materials or deformation. Do not delete objects before patch export.
+
+`tests/audit_duplicate_geometry.py <model-directory>` reports exact coincident
+triangle sets without requiring Blender. This is a positional comparison only.
