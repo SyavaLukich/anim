@@ -98,6 +98,41 @@ class ConstantChannels(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'channel index'):
             mmo.pose_nodes(clip, rig)
 
+    def test_temporal_scalar_and_flag_time_scale(self):
+        payload = struct.pack('>HHhH', 0x28, 2, 32, 100) + bytes((0, 10)) + struct.pack('>2h', 0, 100)
+        tracks, data = self.parse(payload)
+        self.assertAlmostEqual(mmo.sample_track(tracks[0], 5), 1.5)
+        self.assertEqual(mmo.sample_track(tracks[0], -1), 1)
+        self.assertEqual(mmo.sample_track(tracks[0], 99), 2)
+        flagged = bytearray(data); flagged[4:6] = b'\x01\x28'
+        t = mmo._parse_tracks(flagged, 0, len(flagged))[0][0]
+        self.assertAlmostEqual(mmo.sample_track(t, 10), 1.5)
+        short_times = struct.pack('>HHhH2H2h', 0x29, 2, 32, 100, 0, 300, 0, 100)
+        short_tracks, _ = self.parse(short_times)
+        self.assertAlmostEqual(mmo.sample_track(short_tracks[0], 150), 1.5)
+        clip = mmo.Clip(); clip.tracks = tracks
+        with self.assertRaisesRegex(ValueError, 'temporal channel editing'):
+            mmo.write_track_values(data, clip, [4])
+
+    def test_temporal_smallest_three_and_axis_angle(self):
+        # Omitted W, all quantized XYZ zero: identity at both keys.
+        payload = struct.pack('>HH4h4H', 0x64, 2, 0, 0, 0, 0, 32768, 32768, 32768, 32768)
+        payload += bytes((0, 10)) + struct.pack('>2I', 3, 3)
+        tracks, _ = self.parse(payload)
+        self.assertEqual(mmo.sample_track(tracks[0], 5), (0, 0, 0, 1))
+        # Fixed X axis, half-angle goes from 0 to pi/2.
+        payload = struct.pack('>HHhH3h', 0x6a, 2, 0, 32767, 32767, 0, 0)
+        payload += bytes((0, 10)) + struct.pack('>2h', 0, 32767)
+        tracks, _ = self.parse(payload)
+        q = mmo.sample_track(tracks[0], 5)
+        self.assertAlmostEqual(q[0], math.sqrt(.5))
+        self.assertAlmostEqual(q[3], math.sqrt(.5))
+        # Both truncation and non-increasing times must fail, no partial import.
+        with self.assertRaises(ValueError):
+            self.parse(payload[:-1])
+        with self.assertRaises(ValueError):
+            self.parse(payload[:14] + bytes((10, 10)) + payload[16:])
+
     def test_unsupported_and_invalid(self):
         for payload in [b'\x01\x63', b'\x01\x20\x00',
                         struct.pack('>HhHh', 0x120, 0, 0, 0), b'\x01\x6e\x00\x00']:

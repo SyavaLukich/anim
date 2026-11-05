@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.3.0
+# Binary Domain Blender addon — v0.4.0
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -69,8 +69,8 @@ of the head. A recorded, automatically estimated uniform scale adapts source
 head height to the imported GMD. This retarget scale is a model adaptation,
 not part of the verified binary encoding and not a claim of engine-identical
 retargeting for arbitrary characters. The head anchor is held at model rest;
-temporal full-body/root-motion blending remains outside this implementation;
-the static p_gen T-pose has a separate body retargeter described below.
+the body retargeter below supports the static p_gen T-pose and two verified
+p_man idle animations. General body/root-motion blending is not implemented.
 
 ### Clip list and memory usage (v0.2.2)
 
@@ -130,14 +130,55 @@ Loaded Actions themselves survive save/reopen without the source files.
 
 Validated on all five supplied Fey variants, including visible mesh movement,
 horizontal bilateral arms, every parent-offset length, finite geometry and
-save/reopen. General temporal body animations, nonzero reserved body controls,
+save/reopen. Body animations other than the two verified idles below, nonzero reserved controls,
 engine procedural-node simulation, and game-side export of this retargeted
 body pose are **not validated/supported by this new body path**. A partial
 skeleton missing required body joints or a mismatched MOMA fails explicitly.
 
+### Real body animation (v0.4.0)
+
+The existing `motion.par` contains **`p_man_adventure.mmo`**. Two genuine
+body idle animations are now supported:
+
+| Clip | Source duration | Source rate | Blender keys |
+|---|---:|---:|---:|
+| `p_Wnon_std_nml` | 80 frame intervals | 30 FPS | 1–81 |
+| `p_Wnon_std_nml_01` | 200 frame intervals | 30 FPS | 1–201 |
+
+Load this `.mmo` on the GMD armature, leaving the MOMA field blank. Bundled
+**`p_man.mma`** is selected automatically. The first idle loads immediately;
+select the longer idle in the panel and click **Apply selected clip**, then
+press **Play**. The scene rate is set to the source 30 FPS. Source frame 0
+maps to Blender frame 1, including the source endpoint at 80/200. These are
+actual source-motion samples, **not** the generated facial preview.
+
+Only **2 of the 40 clips** in this file are enabled, and the panel says so.
+Other clips use additional unimplemented codecs and are not advertised as
+supported. This is body idle movement, not walking/running support.
+Each selected motion is baked once at native-frame resolution using bulk
+FCurve writes and cached as an Action. The other motion remains unloaded.
+At native integer frames it follows decoded scalar/SLERP source curves;
+Blender's interpolation between those baked frames is linear in channel space.
+
+The 79-node body rig has rotation-only nodes, default local positions from
+NDT0, procedural nodes, and absolute/world-space nodes (flag `0x40`). The
+retargeter handles these separately rather than using the facial layout.
+Target lengths are retained. Root translation is relative to the first source
+pose and scaled to target height; auxiliary travel controls must remain zero
+for these verified clips. Engine IK, foot locking, procedural helper simulation
+and exact generic-rig end-effector positions are not reconstructed. Imported
+skin weights, topology, rest pose and materials remain unchanged.
+
+Both clips were tested on all five Fey variants for real mesh movement,
+frame-by-frame transform agreement at sample frames, preserved parent-offset
+lengths, 30 FPS, save/reopen and reuse without source files. An optional x86
+emulator test compares 336 curve evaluations with the game's isolated math
+kernels: maximum observed error **4.74e-6**. The game binary and emulator are
+not required at addon runtime or included in the addon.
+
 ### Exact source data
 
-Each pose Action keeps:
+Each pose/motion Action keeps:
 
 - `gmd_momo_raw_words`: exact channel words, including opcodes and divisors;
 - `gmd_source_frames`: source duration metadata;
@@ -230,3 +271,5 @@ Path checks are covered by `tests/test_input_paths.py` under bpy; native
 Windows GUI/filesystem behavior has not been exercised in this Linux sandbox.
 
 Body regression: `LD_LIBRARY_PATH=/home/user/xlibs python3 tests/test_body_retarget.py` (local game fixtures, not distributed).
+
+Temporal tests: `tests/test_body_motion.py` (bpy + local fixtures), `tests/test_temporal_oracle.py` (optional local EXE + pefile/unicorn).

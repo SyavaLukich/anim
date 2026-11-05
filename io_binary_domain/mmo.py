@@ -6,6 +6,7 @@ TRK2: u32 channel count; face node: scalar X, Y, Z, quaternion XYZW.
 0162 stores 4 signed normalized shorts; 016e is an identity quaternion.
 The 00-prefixed variants are supported too; 002e is a zero scalar.
 The Fey pattern corpus contains 95 static expression poses (184 channels each).
+Verified sparse scalar/quaternion/axis-angle curves are supported.
 Other animated channel opcodes are rejected, not guessed. See README.
 """
 import struct
@@ -16,7 +17,10 @@ def _cstr(b):
 
 
 class Track:
-    __slots__ = ('value', 'kind', 'opcode', 'offset', 'words')
+    __slots__ = ('value', 'kind', 'opcode', 'offset', 'words', 'times', 'samples')
+
+    def __init__(self):
+        self.times = self.samples = None
 
     def __repr__(self):
         return '<Track %s value=%r>' % (self.kind, self.value)
@@ -25,7 +29,7 @@ class Track:
 class Clip:
     __slots__ = ('index', 'offset', 'length', 'id', 'frames', 'speed',
                  'name', 'tail', 'prg2', 'tracks', 'trk_off', 'trk_len',
-                 'hed0_raw', 'header')
+                 'hed0_raw', 'header', 'fps')
 
     def __repr__(self):
         return '<Clip %s>' % self.name
@@ -66,7 +70,8 @@ def parse_momo(data, decode_tracks=True):
         c.hed0_raw = bytes(data[ho + 8: ho + hl])
         p = c.hed0_raw
         c.id = struct.unpack_from('>H', p, 0)[0]
-        c.frames = struct.unpack_from('>H', p, 6)[0]
+        c.frames = struct.unpack_from('>H', p, 4)[0]
+        c.fps = struct.unpack_from('>H', p, 6)[0]
         c.speed = struct.unpack_from('>f', p, 12)[0]
         h1o, h1l = inner[b'HED1']
         payload = data[h1o + 8: h1o + h1l]
@@ -96,6 +101,94 @@ def decode_clip(data, clip):
     return clip
 
 
+def _quat_slerp(a, b, t):
+    import math
+    na = math.sqrt(sum(v*v for v in a)); nb = math.sqrt(sum(v*v for v in b))
+    if min(na, nb) < 1e-8:
+        raise ValueError('zero curve quaternion')
+    a = tuple(v/na for v in a); b = tuple(v/nb for v in b)
+    dot = sum(x*y for x, y in zip(a, b))
+    if dot < 0:
+        b = tuple(-v for v in b); dot = -dot
+    if dot > .9995:
+        q = tuple(x + t*(y-x) for x, y in zip(a, b))
+        n = math.sqrt(sum(v*v for v in q))
+        return tuple(v/n for v in q)
+    angle = math.acos(min(1, dot)); den = math.sin(angle)
+    return tuple((x*math.sin((1-t)*angle) + y*math.sin(t*angle))/den
+                 for x, y in zip(a, b))
+
+
+def sample_track(track, frame):
+    import bisect
+    if track.times is None:
+        return track.value
+    time = frame * (.5 if track.opcode >> 8 & 1 else 1)
+    i = bisect.bisect_right(track.times, time) - 1
+    if i < 0:
+        return track.samples[0]
+    if i >= len(track.times)-1:
+        return track.samples[-1]
+    f = (time-track.times[i])/(track.times[i+1]-track.times[i])
+    a, b = track.samples[i:i+2]
+    if track.kind == 'quaternion':
+        return _quat_slerp(a, b, f)
+    return a + f*(b-a)
+
+
+def _parse_curve(data, start, end):
+    """Verified sparse linear scalar / smallest-three / fixed-axis curves.
+
+    Loader D8B122/D8B37E/D8B5A1; evaluators 409590/40BAC0/40D9B0.
+    Keep the full serialized words separately; temporal edits are unsupported.
+    """
+    import math
+    opcode, count = struct.unpack_from('>2H', data, start)
+    code = opcode & 255
+    header = 8 if code in (0x28, 0x29) else 20 if code in (0x64, 0x65) else 14
+    short_times = code in (0x29, 0x65, 0x6b)
+    time_size = count*2 if short_times else count + count % 2
+    width = header + time_size + count*(4 if code in (0x64, 0x65) else 2)
+    if count == 0 or start + width > end:
+        raise ValueError('truncated/empty MOMO curve at 0x%x' % start)
+    times = list(struct.unpack_from('>%d%s' % (count, 'H' if short_times else 'B'),
+                                    data, start+header))
+    if any(b <= a for a, b in zip(times, times[1:])):
+        raise ValueError('non-increasing MOMO curve times')
+    p = start+header+time_size
+    t = Track(); t.opcode = opcode; t.offset = start; t.times = times
+    if code in (0x28, 0x29):
+        base, divisor = struct.unpack_from('>hH', data, start+4)
+        if divisor == 0:
+            raise ValueError('zero curve scalar divisor')
+        t.kind = 'scalar'
+        t.samples = [base/32 + v/divisor for v in struct.unpack_from('>%dh' % count, data, p)]
+    elif code in (0x64, 0x65):
+        base = struct.unpack_from('>4h', data, start+4)
+        scale = struct.unpack_from('>4H', data, start+12)
+        t.kind = 'quaternion'; t.samples = []
+        for word in struct.unpack_from('>%dI' % count, data, p):
+            omitted = word & 3
+            packed = [(word >> shift) & 1023 for shift in (22, 12, 2)]
+            q = [0.0]*4; j = 0
+            for axis in range(4):
+                if axis != omitted:
+                    q[axis] = base[axis]/32768 + packed[j]/1024 * scale[axis]/32768
+                    j += 1
+            q[omitted] = math.sqrt(max(0, 1-sum(v*v for v in q)))
+            t.samples.append(tuple(q))
+    else:
+        base, scale, x, y, z = struct.unpack_from('>hH3h', data, start+4)
+        t.kind = 'quaternion'; t.samples = []
+        for v in struct.unpack_from('>%dh' % count, data, p):
+            half_angle = (base/32767 + v/32767 * scale/32767) * math.pi/2
+            s = math.sin(half_angle)
+            t.samples.append((x/32767*s, y/32767*s, z/32767*s, math.cos(half_angle)))
+    t.value = t.samples[0]
+    t.words = struct.unpack_from('>%dH' % (width//2), data, start)
+    return t, width
+
+
 def _parse_tracks(data, off, ln):
     """TRK2 constant channels, as loaded by BinaryDomain.exe at VA D8B000.
 
@@ -115,9 +208,15 @@ def _parse_tracks(data, off, ln):
         opcode = struct.unpack_from('>H', data, p)[0]
         widths = {0x20: 8, 0x2e: 2, 0x62: 10, 0x6e: 2}
         code = opcode & 0xff
+        if opcode >> 8 in (0, 1) and code in (0x28, 0x29, 0x64, 0x65, 0x6a, 0x6b):
+            if p + 4 > end:
+                raise ValueError('truncated curve header')
+            t, width = _parse_curve(data, p, end)
+            tracks.append(t); p += width
+            continue
         if opcode >> 8 not in (0, 1) or code not in widths:
             raise ValueError('unsupported MOMO channel opcode 0x%04x at 0x%x; '
-                             'only constant expression channels are supported'
+                             'only verified constant/sparse channel codecs are supported'
                              % (opcode, p))
         width = widths[code]
         if p + width > end:
@@ -147,7 +246,7 @@ def _parse_tracks(data, off, ln):
     return tracks, count
 
 
-def pose_nodes(clip, rig=None):
+def pose_nodes(clip, rig=None, frame=0):
     """Decode node transforms, honoring NOD3 indirection when a rig is supplied.
 
     p_gen reserves channels 0..7 outside the node table. Flag-6 procedural
@@ -160,24 +259,29 @@ def pose_nodes(clip, rig=None):
     else:
         indices = rig['channel_indices']
         groups = []
-        for flag, off in zip(rig['node_flags'], rig['node_offsets']):
+        for ni, (flag, off) in enumerate(zip(rig['node_flags'], rig['node_offsets'])):
             if flag == 6:
                 groups.append(None)
-            elif flag == 1 and off + 4 <= len(indices):
+            elif flag in (1, 65) and off + 4 <= len(indices):
                 groups.append(indices[off:off + 4])
+            elif flag == 0 and off < len(indices):
+                groups.append(indices[off:off+1])
             else:
                 raise ValueError('unsupported MOMA node declaration')
     nodes = []
-    for ids in groups:
+    for ni, ids in enumerate(groups):
         if ids is None:
             nodes.append(None)
             continue
         if any(i < 0 or i >= len(clip.tracks) for i in ids):
             raise ValueError('MOMA channel index exceeds MOMO channel count')
         group = [clip.tracks[i] for i in ids]
+        if len(group) == 1 and group[0].kind == 'quaternion':
+            nodes.append((tuple(rig['rest_positions'][ni]), sample_track(group[0], frame)))
+            continue
         if [t.kind for t in group] != ['scalar', 'scalar', 'scalar', 'quaternion']:
             raise ValueError('unexpected MOMO node channel layout')
-        nodes.append((tuple(t.value for t in group[:3]), group[3].value))
+        nodes.append((tuple(sample_track(t, frame) for t in group[:3]), sample_track(group[3], frame)))
     return nodes
 
 
@@ -194,6 +298,8 @@ def write_track_values(data, clip, values):
     for t, value in zip(clip.tracks, values):
         words = t.words
         if value != t.value:
+            if t.times is not None:
+                raise ValueError('temporal channel editing is not supported by the fixed-layout patcher')
             if t.kind == 'scalar':
                 if t.opcode & 0xff == 0x2e:
                     raise ValueError('zero scalar channel cannot expand in a fixed-layout patch')
@@ -271,6 +377,13 @@ def parse_moma(data):
         for i, parent in enumerate(res['parents']):
             if parent >= i or parent < -1:
                 raise ValueError('unsupported cyclic/out-of-order MOMA hierarchy')
+    if b'NDT0' in inner:
+        o, ln = inner[b'NDT0']
+        count, scale = struct.unpack_from('>If', data, o)
+        if count != len(res['nodes']) or ln != 16 + 16*count or scale <= 0:
+            raise ValueError('invalid MOMA default positions')
+        res['rest_positions'] = [[v/scale for v in struct.unpack_from('>3h', data, o+16+16*i)]
+                                 for i in range(count)]
     if b'MIR0' in inner:
         o, l = inner[b'MIR0']
         cnt = struct.unpack_from('>I', data, o)[0]

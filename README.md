@@ -6,6 +6,11 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.4.0:** two real body idle animations from `p_man_adventure.mmo`,
+original 30 FPS timeline, sparse scalar/quaternion codecs checked against
+executable math kernels, and automatic bundled `p_man.mma`. Other body clips
+remain explicitly unsupported.
+
 **v0.3.0:** static full-body `p_gen_tpose` retarget with automatic bundled
 `p_gen.mma`, true GMD bind rotations, preserved target bone lengths/root, and
 five-model geometry/persistence regressions. Not temporal locomotion.

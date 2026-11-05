@@ -172,3 +172,59 @@ migration, unsupported auxiliary controls and Action save/reopen application.
 A front-view Cycles render of the naked model was inspected in rest and T-pose.
 This is not a comparison against engine screenshots or validation of game-side
 export, temporal locomotion or engine procedural-node evaluation.
+
+## v0.4.0 temporal body idle corpus
+
+From the same user-provided motion.par: p_man_adventure.mmo, 40 RAW0 clips,
+and p_man.mma. Verified clips p_Wnon_std_nml and p_Wnon_std_nml_01 have 85
+channels and durations 80 and 200. Other clips require additional codecs;
+the Blender catalog exposes only these two validated names/durations.
+
+HED0 u16 at +4 is duration in source frames, u16 at +6 is **FPS**, not duration.
+Earlier static-pose code treated +6 as a duration; this is corrected, with FPS
+kept separately. Speed at +12 is 1.0 for both enabled clips. Bake source samples
+0..duration onto Blender 1..duration+1 at 30 FPS. Per-track header bit 0 in the
+leading byte multiplies evaluation time by 0.5 (EXE D8A0C0/D8A100), not a flag
+to discard when evaluating curves.
+
+Implemented temporal types (all arrays big-endian on disk):
+
+- 28/29: u16 count, s16 base, u16 divisor, byte/u16 key times, then count s16
+  samples. Byte time arrays are padded to even length. Values are base/32 +
+  sample/divisor, with piecewise-linear interpolation and endpoint clamping.
+  Loader D8B122, scalar evaluator 409590 for byte times.
+- 64/65: u16 count, 4 s16 base components, 4 u16 ranges, byte/u16 times,
+  then count packed u32 quaternions. Low 2 bits select the omitted component;
+  remaining unsigned 10-bit fields occupy 22..31, 12..21 and 2..11, assigned
+  to the other components in XYZ W order. Component = base/32768 +
+  quantized/1024 * range/32768. Reconstruct the omitted positive component
+  as sqrt(max(0,1-sum(other^2))). Shortest-path SLERP between keys.
+  Loader D8B37E; evaluator 40BAC0, unpack helper D8C3B0.
+- 6A/6B: u16 count, s16 angular base, u16 angular range, 3 s16 fixed-axis
+  components, byte/u16 times, count s16 angular samples. Quaternion half-angle
+  = (base/32767 + sample/32767 * range/32767) * pi/2; xyz = axis/32767 * sin,
+  w = cos. Evaluate keys then shortest-path SLERP (not guessed Euler curves).
+  Loader D8B5A1; evaluator 40D9B0 and angular helper D8D510.
+
+All raw temporal words are preserved. Unchanged channel patching remains
+byte-exact; attempting to edit a temporal channel with the fixed-layout
+constant patcher fails explicitly instead of corrupting the stream.
+
+p_man NOD3 maps 82 entries to source channels 3..84; first three auxiliary
+scalar channels are zero in these clips. Flags: 0 = rotation-only (translation
+from NDT0), 1 = XYZ+quaternion, 6 = procedural/no channels, 0x41 = world-space
+XYZ+quaternion. The world-space flag stops parent composition; EXE D8AAD1
+and D8D050 distinguish it explicitly. NDT0 default positions use s16 XYZ /
+the float scale at header +4. Target bind-relative rotations use the v0.3
+method; target lengths are kept, with root displacement relative to the first
+source sample. Exact game IK/foot locking and procedural helpers are not claimed.
+
+`tests/test_temporal_oracle.py` executes the isolated evaluator kernels in
+Unicorn with native little-endian loaded-track layout, never starting the game.
+336 comparisons across every temporal track in both clips (including fractional
+times and endpoints) pass with maximum error 4.731045787242927e-6. This is an
+optional research regression; EXE/Unicorn/pefile are not shipped/runtime dependencies.
+Baked Actions use continuous quaternion signs and LINEAR native-frame keys,
+bulk-filled FCurves rather than millions of per-frame keyframe_insert calls.
+Subframe playback between the integer-frame bake keys is Blender interpolation,
+not a claim of exact engine subframe SLERP.

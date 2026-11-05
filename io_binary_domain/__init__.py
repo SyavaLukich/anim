@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -538,9 +538,9 @@ def _input_file_path(value, extension, label, default=None):
     return path
 
 
-def _default_rig_path(body=False):
+def _default_rig_path(body=False, motion=False):
     here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(here, 'rigs', 'p_gen.mma' if body else 'f_man.mma')
+    return os.path.join(here, 'rigs', 'p_man.mma' if motion else 'p_gen.mma' if body else 'f_man.mma')
 
 
 def repair_gmd_skin_groups(context, arm):
@@ -690,24 +690,73 @@ def _key_momo_basis(pb, basis, frame):
 # All catalogs load one Action by default, including small libraries.
 
 
+# Verified idle clips in p_man_adventure.mmo. Other codecs fail explicitly.
+BODY_MOTION_CLIPS = {'p_Wnon_std_nml': 80, 'p_Wnon_std_nml_01': 200}
+
+
+def _is_body_motion(rig):
+    return len(rig['nodes']) == 79 and rig['name'] == 'p_man'
+
+
+def _bake_body_motion(arm, clip, rig):
+    """Sample the source timeline once; bulk-fill FCurves, not per-frame inserts."""
+    from array import array
+    curves, previous = {}, {}
+    for source_frame in range(clip.frames + 1):
+        bases = _body_bases(arm, clip, rig, frame=source_frame)
+        frame = source_frame + 1
+        for name, basis in bases.items():
+            loc, q, scale = basis.decompose()
+            if name in previous and q.dot(previous[name]) < 0:
+                q.negate()
+            previous[name] = q.copy()
+            pb = arm.pose.bones[name]
+            for prop, vals in (('location', loc), ('rotation_quaternion', q), ('scale', scale)):
+                path = pb.path_from_id(prop)
+                for i, value in enumerate(vals):
+                    curves.setdefault((path, i), array('f')).extend((frame, value))
+    return curves
+
+
+def _fill_body_motion_curves(action, samples):
+    if hasattr(action, 'slots') and len(action.slots) and len(action.layers):
+        curves = action.layers[0].strips[0].channelbag(action.slots[0]).fcurves
+    else:
+        curves = action.fcurves
+    for curve in curves:
+        coords = samples[(curve.data_path, curve.array_index)]
+        curve.keyframe_points.clear()
+        curve.keyframe_points.add(len(coords)//2)
+        curve.keyframe_points.foreach_set('co', coords)
+        for point in curve.keyframe_points:
+            point.interpolation = 'LINEAR'
+        curve.update()
+
+
 def _is_body_rig(rig):
-    return (len(rig['nodes']) == 161 and rig['nodes'][:2] ==
+    return _is_body_motion(rig) or (len(rig['nodes']) == 161 and rig['nodes'][:2] ==
             ['moo_centroid', 'center_c_n'])
 
 
-def _body_bases(arm, clip, rig):
-    """Length-preserving anatomical retarget for the verified p_gen T-pose.
+def _body_bases(arm, clip, rig, frame=0):
+    """Length-preserving anatomical retarget for verified p_gen/p_man poses.
 
     Use actual GMD local quaternions at record +0x30, NOT direction/length
     fields at +0x60 interpreted as axis-angle. Keep proportions/root anchor.
     Model-specific face/hair/support bones follow their target parents rigidly.
     Procedural MOMA nodes absent on the target are not invented/animated.
     """
-    if clip.name != 'p_gen_tpose' or clip.header != 644 or not _is_body_rig(rig):
-        raise GmdExportError('Body retarget currently supports only p_gen_basic / p_gen_tpose with p_gen.mma')
-    if any(t.kind != 'scalar' or abs(t.value) > 1e-8 for t in clip.tracks[:8]):
-        raise GmdExportError('Nonzero auxiliary body channels are not supported by static T-pose retarget')
-    values = mmo_mod.pose_nodes(clip, rig)
+    motion = _is_body_motion(rig)
+    if motion:
+        if (clip.header != 85 or clip.frames != BODY_MOTION_CLIPS.get(clip.name) or
+                clip.fps != 30 or clip.speed != 1):
+            raise GmdExportError('Only verified p_man_adventure idle clips are enabled for temporal body retarget')
+    elif clip.name != 'p_gen_tpose' or clip.header != 644 or not _is_body_rig(rig):
+        raise GmdExportError('Body retarget requires the supported p_gen T-pose or p_man idle rig')
+    if any(t.kind != 'scalar' or abs(mmo_mod.sample_track(t, frame)) > 1e-8
+           for t in clip.tracks[:3 if motion else 8]):
+        raise GmdExportError('Nonzero auxiliary body channels are not supported')
+    values = mmo_mod.pose_nodes(clip, rig, frame=frame)
     worlds = []
     for i, value in enumerate(values):
         parent = rig['parents'][i]
@@ -720,12 +769,21 @@ def _body_bases(arm, clip, rig):
             raise GmdExportError('invalid body quaternion')
         local = q.normalized().to_matrix().to_4x4()
         local.translation = pos
-        if parent >= 0:
+        if parent >= 0 and not rig['node_flags'][i] & 0x40:
             if worlds[parent] is None:
                 raise GmdExportError('unsupported child of procedural body node')
             local = worlds[parent] @ local
         worlds.append(local)
     source = {n: w for n, w in zip(rig['nodes'], worlds) if w is not None}
+    root_delta = mathutils.Vector((0, 0, 0))
+    if motion:
+        root_index = rig['nodes'].index('center_c_n')
+        initial = mathutils.Vector(mmo_mod.pose_nodes(clip, rig, frame=0)[root_index][0])
+        current = source['center_c_n'].translation
+        root_height = arm.data.bones.get('center_c_n')
+        if root_height is not None and abs(initial.y) > 1e-8:
+            root_delta = (current - initial) * (root_height.head_local.y / initial.y)
+
     required = ['center_c_n', 'ketu_c_n', 'kosi_c_n', 'mune_c_n', 'kubi_c_n', 'face_c_n']
     required += [f'{part}_{side}_n' for side in ('l', 'r')
                  for part in ('kata', 'ude1', 'ude2', 'ude3', 'asi1', 'asi2', 'asi3', 'asi4')]
@@ -776,6 +834,8 @@ def _body_bases(arm, clip, rig):
         else:
             inherited = mathutils.Matrix.Identity(3)
             pos = bone.head_local.copy()
+        if name == 'center_c_n':
+            pos += root_delta
         # Unmapped model-specific bones follow their target parent rigidly.
         delta = rotations.get(name, inherited)
         mat = (delta @ bone.matrix_local.to_3x3()).to_4x4()
@@ -824,6 +884,7 @@ def _create_momo_action(arm, clip, rig, path, bases=None):
     scale = _momo_retarget_scale(arm, clip, rig)
     if bases is None:
         bases = _momo_bases(arm, clip, rig, scale)
+    motion_samples = _bake_body_motion(arm, clip, rig) if _is_body_motion(rig) else None
     prefix = os.path.splitext(os.path.basename(path))[0]
     act = bpy.data.actions.new('%s__%s' % (prefix, clip.name))
     act.use_fake_user = True
@@ -833,7 +894,13 @@ def _create_momo_action(arm, clip, rig, path, bases=None):
     act['gmd_momo_scale'] = scale
     act['gmd_momo_raw_words'] = json.dumps([list(t.words) for t in clip.tracks])
     act['gmd_source_frames'] = clip.frames
-    act['gmd_momo_kind'] = 'constant_body_pose' if _is_body_rig(rig) else 'constant_expression'
+    act['gmd_source_header'] = clip.hed0_raw.hex()
+    act['gmd_momo_kind'] = ('body_motion' if _is_body_motion(rig) else
+                            'constant_body_pose' if _is_body_rig(rig) else 'constant_expression')
+    if _is_body_motion(rig):
+        act['gmd_source_fps'] = clip.fps
+        act['gmd_timing'] = 'source_timeline'
+        act['gmd_root_motion'] = 'relative_to_first_source_frame'
     act['gmd_momo_retarget'] = 'length_preserving_body' if _is_body_rig(rig) else 'face'
     _assign_momo_action(arm, act)
     for name, basis in bases.items():
@@ -845,7 +912,9 @@ def _create_momo_action(arm, clip, rig, path, bases=None):
         for k in range(3):
             pb['gmd_c%d' % k] = clip.tracks[ni * 4 + k].value
             pb.keyframe_insert(data_path='["gmd_c%d"]' % k, frame=1)
-    act.frame_range = (1, max(1, clip.frames))
+    if motion_samples is not None:
+        _fill_body_motion_curves(act, motion_samples)
+    act.frame_range = (1, max(1, clip.frames + (1 if motion_samples is not None else 0)))
     return act
 
 
@@ -859,13 +928,19 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False, eager=
     clips = mmo_mod.parse_momo(data, decode_tracks=False)
     if not clips:
         raise GmdExportError('MOMO contains no supported expression clips')
-    body = all(c.header == 644 and c.name == 'p_gen_tpose' for c in clips)
+    total_clips = len(clips)
+    motion = all(c.header == 85 for c in clips)
+    if motion:
+        clips = [c for c in clips if c.name in BODY_MOTION_CLIPS]
+        if not clips:
+            raise GmdExportError('No verified body motion in this library; choose p_man_adventure.mmo')
+    body = motion or all(c.header == 644 and c.name == 'p_gen_tpose' for c in clips)
     if not body and any(c.header != 184 for c in clips):
-        raise GmdExportError('Unsupported body library; only p_gen_basic / p_gen_tpose and f_man faces are supported')
-    rig_path = _input_file_path(mma_path, '.mma', 'MOMA rig', _default_rig_path(body))
+        raise GmdExportError('Supported: f_man faces, p_gen T-pose, and verified p_man_adventure idle clips')
+    rig_path = _input_file_path(mma_path, '.mma', 'MOMA rig', _default_rig_path(body, motion))
     rig = mmo_mod.parse_moma(open(rig_path, 'rb').read())
-    if body != _is_body_rig(rig):
-        raise GmdExportError('MOMO/MOMA rig mismatch: p_gen_basic requires p_gen.mma; face clips require f_man.mma')
+    if body != _is_body_rig(rig) or motion != _is_body_motion(rig):
+        raise GmdExportError('MOMO/MOMA rig mismatch: use the matching f_man, p_gen or p_man rig')
     lazy = not eager
     selected = clips[:1] if lazy else clips
     prepared = []
@@ -887,7 +962,9 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False, eager=
     stat = os.stat(path)
     arm_obj['gmd_momo_file_version'] = json.dumps([stat.st_size, stat.st_mtime_ns])
     arm_obj['gmd_momo'] = path
-    arm_obj['gmd_momo_mode'] = 'decoded_constant_body_poses' if body else 'decoded_constant_expressions'
+    arm_obj['gmd_momo_mode'] = ('decoded_body_motion' if motion else
+                                'decoded_constant_body_poses' if body else 'decoded_constant_expressions')
+    arm_obj['gmd_momo_total_clips'] = total_clips
     arm_obj['gmd_momo_lazy'] = lazy
     arm_obj['gmd_momo_rig'] = json.dumps(rig)
     arm_obj['gmd_momo_scale'] = first_action['gmd_momo_scale']
@@ -900,7 +977,11 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False, eager=
     _momo_enum_cache.clear()
     _assign_momo_action(arm_obj, first_action)
     bpy.context.scene.frame_start = 1
-    bpy.context.scene.frame_end = max(1, max(c.frames for c in clips))
+    bpy.context.scene.frame_end = (int(first_action.frame_range[1]) if motion else
+                                   max(1, max(c.frames for c in clips)))
+    if motion:
+        bpy.context.scene.render.fps = clips[0].fps
+        bpy.context.scene.render.fps_base = 1
     bpy.context.scene.frame_set(1)
     bpy.context.view_layer.update()
     return len(clips)
@@ -995,7 +1076,7 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator, ImportHelper):
     check_extension = False  # Never turn a directory into 'directory.mmo'.
     filepath: StringProperty(name='MOMO file (.mmo)', subtype='FILE_PATH')
     rig_mma: StringProperty(name='Optional MOMA file (.mma)', subtype='NONE',
-                            description='Optional .mma; blank selects bundled f_man or p_gen rig automatically')
+                            description='Optional .mma; blank selects bundled f_man, p_gen or p_man rig automatically')
     eager: BoolProperty(name='Load all Actions (slow)', default=False,
                         description='Create Actions for every clip instead of loading on selection')
     bake_euler: BoolProperty(default=False, options={'HIDDEN'})
@@ -1063,7 +1144,13 @@ class BDOMAIN_OT_apply_clip(bpy.types.Operator):
         if act is None:
             self.report({'ERROR'}, 'expression Action not found; reload MOMO')
             return {'CANCELLED'}
+        index = ob.bdomain_momo_clips.find(self.name)
+        if index >= 0:
+            ob.bdomain_momo_clip_index = index
         _assign_momo_action(ob, act)
+        if act.get('gmd_momo_kind') == 'body_motion':
+            context.scene.render.fps = act['gmd_source_fps']
+            context.scene.render.fps_base = 1
         context.scene.frame_start = 1
         context.scene.frame_end = max(1, int(act.frame_range[1]))
         context.scene.frame_set(1)
@@ -1129,7 +1216,7 @@ def _cleanup_unused_momo_actions():
     removed = 0
     for action in list(bpy.data.actions):
         if not (action.get('gmd_raw_momo') or action.get('gmd_momo_kind') in
-                ('constant_expression', 'constant_body_pose', 'generated_preview')):
+                ('constant_expression', 'constant_body_pose', 'body_motion', 'generated_preview')):
             continue
         if action.users > int(action.use_fake_user):
             continue
@@ -1273,7 +1360,12 @@ class BDOMAIN_PT_panel(bpy.types.Panel):
             if ob.get('gmd_momo_lazy'):
                 box.label(text='Load one Action on selection')
                 box.label(text='%d Actions loaded' % ob.get('gmd_momo_loaded_count', 0))
-            if ob.get('gmd_momo_mode') == 'decoded_constant_body_poses':
+            if ob.get('gmd_momo_mode') == 'decoded_body_motion':
+                box.label(text='Source body animation - press Play', icon='PLAY')
+                box.label(text='30 FPS; original timing')
+                box.label(text='%d supported / %d source clips' % (
+                    ob.get('gmd_momo_clip_count', 0), ob.get('gmd_momo_total_clips', 0)))
+            elif ob.get('gmd_momo_mode') == 'decoded_constant_body_poses':
                 box.label(text='Static full-body T-pose', icon='ARMATURE_DATA')
                 box.label(text='Model proportions preserved')
             elif ob.get('gmd_momo_mode') == 'decoded_constant_expressions':
