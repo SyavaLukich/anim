@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Binary Domain MOMO constant expression channels and MOMA face-rig names.
 
-TRK2: u32 channel count; per node: scalar X, Y, Z, quaternion XYZW.
+TRK2: u32 channel count; face node: scalar X, Y, Z, quaternion XYZW.
 0120 stores {s16 base, u16 divisor, s16 numerator}: base/32 + numerator/divisor.
 0162 stores 4 signed normalized shorts; 016e is an identity quaternion.
+The 00-prefixed variants are supported too; 002e is a zero scalar.
 The Fey pattern corpus contains 95 static expression poses (184 channels each).
 Other animated channel opcodes are rejected, not guessed. See README.
 """
@@ -33,7 +34,7 @@ class Clip:
 def _read_chunks(data, off, end):
     out = []
     while off + 8 <= end:
-        m = data[off:off + 4]
+        m = bytes(data[off:off + 4])
         ln = struct.unpack_from('>I', data, off + 4)[0]
         if ln < 8 or off + ln > end:
             break
@@ -42,7 +43,7 @@ def _read_chunks(data, off, end):
     return out
 
 
-def parse_momo(data):
+def parse_momo(data, decode_tracks=True):
     if data[:4] != b'MOMO':
         raise ValueError('not a MOMO file')
     clips = []
@@ -77,17 +78,29 @@ def parse_momo(data):
         to, tl = inner[b'TRK2']
         c.trk_off = to + 8
         c.trk_len = tl - 8  # payload only
-        c.tracks, c.header = _parse_tracks(data, to + 8, tl - 8)
+        if c.trk_len < 4:
+            raise ValueError('truncated TRK2 header')
+        c.header = struct.unpack_from('>I', data, c.trk_off)[0]
+        c.tracks = None
+        if decode_tracks:
+            decode_clip(data, c)
         clips.append(c)
         off += ln
         ci += 1
     return clips
 
 
+def decode_clip(data, clip):
+    """Decode one indexed clip on demand, without decoding the whole library."""
+    clip.tracks, clip.header = _parse_tracks(data, clip.trk_off, clip.trk_len)
+    return clip
+
+
 def _parse_tracks(data, off, ln):
     """TRK2 constant channels, as loaded by BinaryDomain.exe at VA D8B000.
 
-    0120: scalar, signed base/32 + signed numerator/unsigned denominator.
+    0020/0120: scalar, signed base/32 + signed numerator/unsigned denominator.
+    002e/012e: zero scalar, no payload.
     0162: constant xyzw quaternion, four signed 16-bit normalized words.
     016e: identity quaternion, no payload. These are NOT key delimiters.
     """
@@ -100,18 +113,21 @@ def _parse_tracks(data, off, ln):
         if p + 2 > end:
             raise ValueError('truncated MOMO channel %d' % index)
         opcode = struct.unpack_from('>H', data, p)[0]
-        widths = {0x0120: 8, 0x0162: 10, 0x016e: 2}
-        if opcode not in widths:
+        widths = {0x20: 8, 0x2e: 2, 0x62: 10, 0x6e: 2}
+        code = opcode & 0xff
+        if opcode >> 8 not in (0, 1) or code not in widths:
             raise ValueError('unsupported MOMO channel opcode 0x%04x at 0x%x; '
                              'only constant expression channels are supported'
                              % (opcode, p))
-        width = widths[opcode]
+        width = widths[code]
         if p + width > end:
             raise ValueError('truncated MOMO channel at 0x%x' % p)
         t = Track()
         t.opcode, t.offset = opcode, p
         t.words = struct.unpack_from('>%dH' % (width // 2), data, p)
-        if opcode == 0x0120:
+        if code == 0x2e:
+            t.kind, t.value = 'scalar', 0.0
+        elif code == 0x20:
             base, divisor, numerator = struct.unpack_from('>hHh', data, p + 2)
             if not divisor:
                 raise ValueError('zero MOMO scalar divisor')
@@ -119,7 +135,7 @@ def _parse_tracks(data, off, ln):
             t.value = base / 32.0 + numerator / divisor
         else:
             t.kind = 'quaternion'
-            if opcode == 0x016e:
+            if code == 0x6e:
                 t.value = (0.0, 0.0, 0.0, 1.0)
             else:
                 t.value = tuple(v / 32767.0 for v in
@@ -159,6 +175,8 @@ def write_track_values(data, clip, values):
         words = t.words
         if value != t.value:
             if t.kind == 'scalar':
+                if t.opcode & 0xff == 0x2e:
+                    raise ValueError('zero scalar channel cannot expand in a fixed-layout patch')
                 if not math.isfinite(value):
                     raise ValueError('non-finite MOMO scalar')
                 base = math.floor(value * 32.0)
@@ -168,7 +186,7 @@ def write_track_values(data, clip, values):
                     raise ValueError('MOMO scalar outside encoding range')
                 words = (t.opcode, base & 0xffff, divisor, numerator & 0xffff)
             else:
-                if t.opcode == 0x016e:
+                if t.opcode & 0xff == 0x6e:
                     raise ValueError('identity quaternion channel cannot expand '
                                      'in a fixed-layout patch')
                 if len(value) != 4 or not all(math.isfinite(v) for v in value):
@@ -216,8 +234,10 @@ def parse_moma(data):
     if b'NOD3' in inner:
         o, ln = inner[b'NOD3']
         count, channels = struct.unpack_from('>2I', data, o)
-        if count != len(res['nodes']) or channels != 4 * count:
+        if count != len(res['nodes']):
             raise ValueError('unsupported MOMA node/channel declaration')
+        res['channel_count'] = channels
+        res['node_flags'] = list(struct.unpack_from('>%dI' % count, data, o + 8))
         parent_off = o + 8 + count * 4
         if parent_off + count * 2 > o + ln:
             raise ValueError('truncated MOMA parent table')

@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 2, 0),
+    "version": (0, 2, 1),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -656,66 +656,97 @@ def _key_momo_basis(pb, basis, frame):
     pb.keyframe_insert(data_path='scale', frame=frame)
 
 
-def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
-    # bake_euler remains an API compatibility argument only. Euler guessing
-    # is intentionally removed: the decoded source quaternion is used instead.
-    if arm_obj.get('gmd_skinning_version') != 2:
-        raise GmdExportError('Re-import the GMD with addon v0.2.0 first: older '
-                             'imports have incorrectly shifted skin groups; or use Repair old skin groups')
-    data = open(mmo_path, 'rb').read()
-    clips = mmo_mod.parse_momo(data)
-    if not clips:
-        raise GmdExportError('MOMO contains no supported expression clips')
-    rig = mmo_mod.parse_moma(open(mma_path or _default_rig_path(), 'rb').read())
-    nodes = rig['nodes']
-    if not nodes:
-        raise GmdExportError('no node names found in MOMA rig')
-    root = arm_obj.data.bones.get(nodes[0])
+# Avoid millions of FCurves when opening a large face-pose library.
+MOMO_EAGER_LIMIT = 256
+
+
+def _momo_retarget_scale(arm, clip, rig):
+    if (len(rig['nodes']) != 46 or rig['nodes'][0] != 'face_c_n' or
+            clip.header != 184):
+        raise GmdExportError('This is a body/different rig (%d MOMO channels); '
+                             'the current Blender retargeter supports the 46-node '
+                             'f_man face rig only. p_gen_basic contains p_gen_tpose, '
+                             'not a walking animation; body retargeting is not implemented.'
+                             % clip.header)
+    root = arm.data.bones.get(rig['nodes'][0])
     if root is None:
-        raise GmdExportError('face root %s is missing' % nodes[0])
-    # Fey variants are uniformly shorter than the source expression rig.
-    # Use head-anchor height for a deterministic, recorded retarget scale;
-    # this is retargeting, NOT part of the verified binary scalar decoder.
-    source_height = mmo_mod.pose_nodes(clips[0])[0][0][1]
-    scale = root.head_local.y / source_height if abs(source_height) > 1e-8 else 1.0
+        raise GmdExportError('face root is missing from the armature')
+    height = mmo_mod.pose_nodes(clip)[0][0][1]
+    scale = root.head_local.y / height if abs(height) > 1e-8 else 1.0
     if not math.isfinite(scale) or scale <= 0:
         raise GmdExportError('cannot determine MOMO retarget scale')
-    # Validate every clip before creating any Actions.
-    prepared = [(c, _expression_bases(arm_obj, c, nodes, rig['parents'], scale)) for c in clips]
+    return scale
+
+
+def _create_momo_action(arm, clip, rig, path, bases=None):
+    nodes = rig['nodes']
+    scale = _momo_retarget_scale(arm, clip, rig)
+    if bases is None:
+        bases = _expression_bases(arm, clip, nodes, rig['parents'], scale)
+    prefix = os.path.splitext(os.path.basename(path))[0]
+    act = bpy.data.actions.new('%s__%s' % (prefix, clip.name))
+    act.use_fake_user = True
+    act['gmd_raw_momo'] = True
+    act['gmd_expression'] = clip.name
+    act['gmd_momo_nodes'] = json.dumps(nodes)
+    act['gmd_momo_scale'] = scale
+    act['gmd_momo_raw_words'] = json.dumps([list(t.words) for t in clip.tracks])
+    act['gmd_source_frames'] = clip.frames
+    act['gmd_momo_kind'] = 'constant_expression'
+    _assign_momo_action(arm, act)
+    for name, basis in bases.items():
+        _key_momo_basis(arm.pose.bones[name], basis, 1)
+    for ni, name in enumerate(nodes):
+        pb = arm.pose.bones.get(name)
+        if pb is None:
+            continue
+        for k in range(3):
+            pb['gmd_c%d' % k] = clip.tracks[ni * 4 + k].value
+            pb.keyframe_insert(data_path='["gmd_c%d"]' % k, frame=1)
+    act.frame_range = (1, max(1, clip.frames))
+    return act
+
+
+def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
+    if arm_obj.get('gmd_skinning_version') != 2:
+        raise GmdExportError('Re-import GMD or use Repair old skin groups first')
+    path = bpy.path.abspath(mmo_path)
+    data = open(path, 'rb').read()
+    # Read clip metadata only. Large libraries must not retain every channel
+    # object or create thousands of Actions just to show a searchable list.
+    clips = mmo_mod.parse_momo(data, decode_tracks=False)
+    if not clips:
+        raise GmdExportError('MOMO contains no supported expression clips')
+    if any(c.header != 184 for c in clips):
+        raise GmdExportError('MOMO has %d channels, not the 184-channel face rig. '
+                             'Body-rig retargeting (including p_gen_tpose in '
+                             'p_gen_basic.mmo) is not implemented; this file '
+                             'cannot be applied with f_man.mma.' % clips[0].header)
+    rig = mmo_mod.parse_moma(open(mma_path or _default_rig_path(), 'rb').read())
+    lazy = len(clips) > MOMO_EAGER_LIMIT
+    selected = clips[:1] if lazy else clips
+    prepared = []
+    for clip in selected:
+        mmo_mod.decode_clip(data, clip)
+        scale = _momo_retarget_scale(arm_obj, clip, rig)
+        prepared.append((clip, _expression_bases(
+            arm_obj, clip, rig['nodes'], rig['parents'], scale)))
     if arm_obj.animation_data and arm_obj.animation_data.action:
         arm_obj.animation_data.action.use_fake_user = True
-    prefix = os.path.splitext(os.path.basename(mmo_path))[0]
     action_map = {}
     first_action = None
-    for c, bases in prepared:
-        act = bpy.data.actions.new('%s__%s' % (prefix, c.name))
-        act.use_fake_user = True
-        act['gmd_raw_momo'] = True
-        act['gmd_expression'] = c.name
-        act['gmd_momo_nodes'] = json.dumps(nodes)
-        act['gmd_momo_scale'] = scale
-        # Exact words retained, including quantization divisors/unused bits.
-        act['gmd_momo_raw_words'] = json.dumps([list(t.words) for t in c.tracks])
-        act['gmd_source_frames'] = c.frames
-        act['gmd_momo_kind'] = 'constant_expression'
-        _assign_momo_action(arm_obj, act)
-        for name, basis in bases.items():
-            _key_momo_basis(arm_obj.pose.bones[name], basis, 1)
-        for ni, name in enumerate(nodes):
-            pb = arm_obj.pose.bones.get(name)
-            if pb is None:
-                continue
-            for k in range(3):
-                # Decoded position components; exact quantized words are on Action.
-                pb['gmd_c%d' % k] = c.tracks[ni * 4 + k].value
-                pb.keyframe_insert(data_path='["gmd_c%d"]' % k, frame=1)
-        act.frame_range = (1, max(1, c.frames))
-        action_map[c.name] = act.name
+    for clip, bases in prepared:
+        act = _create_momo_action(arm_obj, clip, rig, path, bases)
+        action_map[clip.name] = act.name
         if first_action is None:
             first_action = act
-    arm_obj['gmd_momo'] = mmo_path
+    stat = os.stat(path)
+    arm_obj['gmd_momo_file_version'] = json.dumps([stat.st_size, stat.st_mtime_ns])
+    arm_obj['gmd_momo'] = path
     arm_obj['gmd_momo_mode'] = 'decoded_constant_expressions'
-    arm_obj['gmd_momo_scale'] = scale
+    arm_obj['gmd_momo_lazy'] = lazy
+    arm_obj['gmd_momo_rig'] = json.dumps(rig)
+    arm_obj['gmd_momo_scale'] = first_action['gmd_momo_scale']
     arm_obj['gmd_clips'] = json.dumps([c.name for c in clips])
     arm_obj['gmd_clip_actions'] = json.dumps(action_map)
     _assign_momo_action(arm_obj, first_action)
@@ -724,6 +755,37 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
     bpy.context.scene.frame_set(1)
     bpy.context.view_layer.update()
     return len(clips)
+
+
+def _load_catalog_expression(arm, name):
+    path = bpy.path.abspath(arm.get('gmd_momo', ''))
+    if not os.path.isfile(path):
+        raise GmdExportError('Source MOMO is required for an unloaded clip: ' + path)
+    stat = os.stat(path)
+    expected = json.loads(arm.get('gmd_momo_file_version', '[]'))
+    if expected != [stat.st_size, stat.st_mtime_ns]:
+        raise GmdExportError('Source MOMO changed or moved; reload its catalog first')
+    data = open(path, 'rb').read()
+    clips = mmo_mod.parse_momo(data, decode_tracks=False)
+    clip = next((c for c in clips if c.name == name), None)
+    if clip is None:
+        raise GmdExportError('Clip not found in source MOMO; reload the catalog')
+    rig = json.loads(arm['gmd_momo_rig'])
+    mmo_mod.decode_clip(data, clip)
+    # Validate/decode before changing the current Action.
+    scale = _momo_retarget_scale(arm, clip, rig)
+    bases = _expression_bases(arm, clip, rig['nodes'], rig['parents'], scale)
+    previous = arm.animation_data.action if arm.animation_data else None
+    try:
+        act = _create_momo_action(arm, clip, rig, path, bases)
+    except Exception:
+        if previous is not None:
+            _assign_momo_action(arm, previous)
+        raise
+    mapping = json.loads(arm['gmd_clip_actions'])
+    mapping[name] = act.name
+    arm['gmd_clip_actions'] = json.dumps(mapping)
+    return act
 
 
 def preview_momo_expression(context, arm):
@@ -796,7 +858,8 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
-        self.report({'INFO'}, 'Imported %d decoded expression poses; use Preview expression blend for motion' % n)
+        count = len(json.loads(ob['gmd_clip_actions']))
+        self.report({'INFO'}, '%d clips available; %d Actions created. Select an expression to load it.' % (n, count))
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -834,10 +897,13 @@ class BDOMAIN_OT_apply_clip(bpy.types.Operator):
             return {'CANCELLED'}
         mapping = json.loads(ob.get('gmd_clip_actions', '{}'))
         action_name = mapping.get(self.name)
-        if not action_name:
-            self.report({'ERROR'}, 'reload MOMO with v0.2.0 to decode expressions')
-            return {'CANCELLED'}
-        act = bpy.data.actions.get(action_name)
+        act = bpy.data.actions.get(action_name) if action_name else None
+        if act is None and ob.get('gmd_momo_lazy'):
+            try:
+                act = _load_catalog_expression(ob, self.name)
+            except Exception as e:
+                self.report({'ERROR'}, str(e))
+                return {'CANCELLED'}
         if act is None:
             self.report({'ERROR'}, 'expression Action not found; reload MOMO')
             return {'CANCELLED'}
@@ -941,6 +1007,9 @@ class BDOMAIN_PT_panel(bpy.types.Panel):
             lay.operator('bdomain.apply_clip')
             box = lay.box()
             box.label(text='%d clips' % len(json.loads(ob['gmd_clips'])))
+            if ob.get('gmd_momo_lazy'):
+                box.label(text='Large library: load on selection')
+                box.label(text='%d Actions loaded' % len(json.loads(ob.get('gmd_clip_actions', '{}'))))
             if ob.get('gmd_momo_mode') == 'decoded_constant_expressions':
                 box.label(text='Decoded expression poses', icon='INFO')
                 box.operator('bdomain.preview_momo')

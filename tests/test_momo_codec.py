@@ -45,6 +45,48 @@ class ConstantChannels(unittest.TestCase):
         self.assertLess(abs(changed[0].value + 0.025), 1/32767)
         self.assertEqual(bytes(data[12:]), original[12:])
 
+    def test_constant_flag_variants_and_zero(self):
+        payload = (struct.pack('>HhHh', 0x20, -1, 32767, 16) +
+                   struct.pack('>H4h', 0x62, 1001, 0, 0, 32752) +
+                   b'\x00\x6e\x00\x2e')
+        tracks, data = self.parse(payload, 4)
+        self.assertAlmostEqual(tracks[0].value, -1/32 + 16/32767)
+        self.assertEqual(tracks[1].value, (1001/32767, 0, 0, 32752/32767))
+        self.assertEqual(tracks[2].value, (0, 0, 0, 1))
+        self.assertEqual(tracks[3].value, 0)
+        clip = mmo.Clip(); clip.tracks = tracks
+        before = bytes(data)
+        mmo.write_track_values(data, clip, [t.value for t in tracks])
+        self.assertEqual(bytes(data), before)
+        values = [t.value for t in tracks]; values[3] = 1
+        with self.assertRaisesRegex(ValueError, 'zero scalar'):
+            mmo.write_track_values(data, clip, values)
+        self.assertEqual(bytes(data), before)
+        with self.assertRaises(ValueError):
+            self.parse(b'\x02\x2e')
+
+    def test_metadata_index_and_deferred_decode(self):
+        def chunk(tag, payload):
+            return tag + struct.pack('>I', len(payload) + 8) + payload
+        def clip(name, channel):
+            header = struct.pack('>4HIf', 0, 0, 0, 1, 0, 30.0)
+            return chunk(b'RAW0', chunk(b'HED0', header) +
+                         chunk(b'HED1', bytes((0, len(name))) + name) +
+                         chunk(b'PRG2', b'') +
+                         chunk(b'TRK2', struct.pack('>I', 1) + channel))
+        data = b'MOMO' + bytes(12) + clip(b'zero', b'\x00\x2e')
+        clips = mmo.parse_momo(bytearray(data), decode_tracks=False)
+        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0].name, 'zero')
+        self.assertEqual(clips[0].header, 1)
+        self.assertIsNone(clips[0].tracks)
+        mmo.decode_clip(data, clips[0])
+        self.assertEqual(clips[0].tracks[0].value, 0)
+        unknown = b'MOMO' + bytes(12) + clip(b'unknown', b'\x01\x63')
+        indexed = mmo.parse_momo(unknown, decode_tracks=False)
+        with self.assertRaises(ValueError):
+            mmo.decode_clip(unknown, indexed[0])
+
     def test_unsupported_and_invalid(self):
         for payload in [b'\x01\x63', b'\x01\x20\x00',
                         struct.pack('>HhHh', 0x120, 0, 0, 0), b'\x01\x6e\x00\x00']:

@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.2.0
+# Binary Domain Blender addon — v0.2.1
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -9,7 +9,7 @@ Download `binary_domain_addon.zip`, install from disk in Blender Preferences,
 enable **Binary Domain: GMD / MOMO**, then restart Blender.
 
 **Old scenes need a skinning migration.** Earlier versions assigned skin groups
-with an off-by-one palette error. Either re-import the GMD in v0.2.0, or:
+with an off-by-one palette error. Either re-import the GMD in v0.2.0 or later, or:
 
 1. Save a backup and select the old armature in **Object Mode**.
 2. Open **N > Binary Domain > Repair old skin groups** and confirm.
@@ -69,6 +69,33 @@ not part of the verified binary encoding and not a claim of engine-identical
 retargeting for arbitrary characters. The head anchor is held at model rest;
 full-body motion/root-motion blending is outside this implementation.
 
+### Large libraries (v0.2.1)
+
+`f_man_all.mmo` contains **4032** static face poses and
+`f_man_motionviewer.mmo` contains **3990**, not time-varying performances.
+Files with more than 256 clips now load a searchable **catalog** and create
+only the first Action. Selecting a different expression decodes that clip
+and creates its Action once; selecting it again reuses the Action. Smaller
+files (including the original 95 Fey poses) retain eager import behavior.
+This avoids allocating millions of FCurves on file load. Retarget scale is
+computed separately for each selected source pose.
+
+The catalog, rig metadata and loaded Actions survive saving the `.blend`.
+**Keep the original `.mmo` at its stored path**: unloaded poses still need
+that file. If the source changes or moves, load its catalog again. Already
+loaded Actions remain usable without the source. Old scenes that already
+contain thousands of Actions are not automatically purged: use a fresh model
+import/scene for the cleanest performance comparison; removing old Actions
+is left to the user to avoid deleting their work.
+
+`p_gen_basic.mmo` is **not a face-pose file**. It has a single static clip,
+`p_gen_tpose`, for the 161-node `p_gen` body rig, including special helper
+nodes with a different channel layout. Its constant channels can now be
+read and patched losslessly by the codec, but **body-rig retargeting into
+Blender is not implemented**. The UI rejects it with a rig-specific message,
+not an unsupported-opcode error. Choosing `p_gen.mma` does not turn this
+facial retargeter into a body-animation importer.
+
 ### Exact source data
 
 Each pose Action keeps:
@@ -95,9 +122,10 @@ Supported constant channel headers:
 
 | Header | Payload | Decoding |
 |---|---|---|
-| `0120` | `s16 base, u16 divisor, s16 fraction` | `base / 32 + fraction / divisor` |
-| `0162` | `s16 x, y, z, w` | signed normalized quaternion components `/32767` |
-| `016e` | none | identity quaternion `(0,0,0,1)` |
+| `0020` / `0120` | `s16 base, u16 divisor, s16 fraction` | `base / 32 + fraction / divisor` |
+| `0062` / `0162` | `s16 x, y, z, w` | signed normalized quaternion components `/32767` |
+| `006e` / `016e` | none | identity quaternion `(0,0,0,1)` |
+| `002e` / `012e` | none | zero scalar; cannot expand in a fixed-layout patch |
 
 `7fff` is commonly the scalar divisor, **not a track separator**. `0162` is a
 constant quaternion, **not Bezier handles**. The former 139-track interpretation
@@ -146,3 +174,5 @@ changed-value patching, malformed/unsupported channels and atomic failure.
 Historical diagnostic helpers remain under `tools/` and `tests/`:
 `repair_scene_uv.py` restores UVs only; it does **not** fix old skin groups.
 Use a fresh v0.2.0 import or the skin-group repair operator for facial playback.
+
+Additional optional game-data regression: `LD_LIBRARY_PATH=/home/user/xlibs python3 tests/test_momo_catalog.py` checks both large libraries, byte-exact patches of every channel, on-demand selection, save/reopen and the body-rig guard. Fixtures are not distributed.

@@ -22,9 +22,12 @@ Relevant virtual addresses in this executable (image base `0x00400000`):
 - `NOD3` loader near `0x00D9B090`: node count, channel count, per-node u32
   declarations, signed 16-bit parents, offsets and channel indices.
 
-The `0x01` leading header byte is retained verbatim. This implementation
-accepts only the exact constant headers `0120`, `0162`, `016e` verified in the
-corpus, not speculative variations of their flags.
+The leading header byte is retained verbatim. The loader skips it before
+switching on the low-byte type. v0.2.1 accepts the observed `00` and `01`
+variants of the supported constants, rejecting other flag bytes. `002e`
+is a no-payload scalar-zero channel in the body T-pose corpus (the loader's
+`0x2e` dispatch also consumes no payload). No temporal interpretation is
+inferred from these flag variants.
 
 ## Scalar example
 
@@ -91,3 +94,26 @@ causing unilateral eye/neck deformation even with correctly decoded poses.
 Raw GMD weight/index bytes were never changed by that display bug; their
 preservation alone could not detect it. Regression tests now compare actual
 Blender groups with the source counted palette and test evaluated deformation.
+
+## Extended corpus / v0.2.1
+
+All channel boundaries were checked in the extracted `motion.par` resources:
+
+| Resource | Clips | Header counts |
+|---|---:|---|
+| f_man_all.mmo | 4032 | 556415 × 0120, 134376 × 016e, 51096 × 0162, 1 × 0020 |
+| f_man_motionviewer.mmo | 3990 | 550620 × 0120, 132444 × 016e, 51096 × 0162 |
+| p_gen_basic.mmo | 1 (p_gen_tpose) | 299 × 0020, 186 × 002e, 124 × 006e, 35 × 0062 |
+
+Every face clip has 184 channels. The body T-pose has 644 channels, and
+its layout must not be assumed to be 161 identical XYZ+quaternion groups:
+two helper nodes have a scalar in the fourth slot. `p_gen.mma` NOD3 declares
+161 nodes but 636 indexed channels, with two node flags equal to 6 instead
+of 1. MOMA metadata parsing no longer equates this declaration with 4×nodes;
+the face retargeter still explicitly rejects this different body rig.
+All three files pass unchanged, byte-exact channel patching. This validates
+binary preservation, **not** body retargeting or a full-body pose in Blender.
+
+Large-library loading first reads metadata without allocating channel objects.
+Only the selected clip is decoded. The original file remains external; loaded
+Actions and rig metadata persist in `.blend`, but unloaded clips require it.
