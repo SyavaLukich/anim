@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.7.0
+# Binary Domain Blender addon — v0.8.0
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -263,7 +263,7 @@ Exact game behavior still requires reconstructing terrain queries, contact
 state, joint limits, torso solving and all code-specific procedural operators.
 Do not interpret successful math/Blender tests as game-equivalence validation.
 
-### Animator control rig (v0.7.0)
+### Animator control rig (v0.7.0, extended in v0.8.0)
 
 A persistent, editable alternative to one-shot correction baking. Select an
 imported GMD armature and click **Create animator control rig**. This builds
@@ -274,6 +274,21 @@ the controls through world-space constraints that can be disabled or removed.
 
 - Same-named **FK bones** on the control armature carry a copy of the current
   Action, so an animated clip starts in FK and plays back unchanged.
+- IK chains cover arms, legs, **spine (waist→chest)** and **neck→head**, each
+  with goal and pole controls and no-pop Match IK/FK. The hips are posed
+  through the leg chain roots and `CTRL_body`; there is no separate hip IK
+  bone in the GMD hierarchy to drive.
+- **Shoulder/clavicle controls** (`CTRL_shoulder_L/R`, Match Shoulder button)
+  offset the `kata_*` clavicle bones on top of either FK or IK arm posing;
+  at zero they follow the clip exactly.
+- **Joint limits (IK solving)**: each mechanism joint solves inside an
+  anatomical range — knees/elbows flex deep but cannot hyperextend or fold
+  past ~150°, spine/neck bend is modest, twist is capped. Limits are
+  Blender-IK swing/twist limits calibrated so the pose at rig creation
+  always stays reachable; toggle them with the **Joint limits** property.
+  They intentionally do **not** clamp FK playback or keyed FK bones: they
+  only stop the IK solver from producing distorted folds, so an
+  out-of-range goal is left unreached with rigid segment lengths.
 - `CTRL_global` moves the whole rig; `CTRL_body` moves the pelvis/torso.
   Hand/foot goal controls and elbow/knee pole controls live under
   `CTRL_global`, so in IK the feet stay planted while the body moves.
@@ -297,17 +312,19 @@ the controls through world-space constraints that can be disabled or removed.
   their follower constraints, restoring direct Action playback.
 
 Limitations: this is Blender's IK, not the game's IK or contact system.
-There are no joint limits and no stretching — an unreachable goal leaves
+There is no stretching — an unreachable (or limit-blocked) goal leaves
 the limb pointing at it with preserved segment lengths. Feet are planted
 only because their goal controls do not move; there is no ground raycast,
 contact detection or terrain adaptation. The v0.6 bake and this rig are
 alternatives: do not stack a correction bake on a rig-driven pose.
 
 Validation: `tests/test_control_rig.py` checks FK preservation of a real
-walk clip at sampled frames, no-pop IK matching, converted-IK preservation,
-planted feet under body motion, foot-roll pivoting, reversible helper
-blending, bake fidelity and segment lengths, save/reopen persistence and
-clean removal.
+walk clip at sampled frames, no-pop IK matching of all six chains,
+converted-IK preservation, planted feet under body motion, foot-roll
+pivoting, shoulder-control offset/restore, joint-limit clamping of a deep
+knee fold (174° → ~113° in the test pose) with rigid segment lengths,
+reversible helper blending, bake fidelity and segment lengths,
+save/reopen persistence and clean removal.
 
 ### Exact source data
 

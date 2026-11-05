@@ -11,6 +11,7 @@ import traceback
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bpy
+from mathutils import Matrix, Vector
 import io_binary_domain as addon
 from io_binary_domain import control_rig as rig
 
@@ -128,6 +129,54 @@ def fixture_test():
     ctrl['bd_helpers'] = 0.0
     rig.refresh(ctrl)
     assert max_diff(base, {pb.name: pb.matrix.copy() for pb in arm.pose.bones}) < 1e-5
+
+    # Shoulder controls: FK-follow by default, a manual offset moves the
+    # clavicle/arm root, and switching back restores the pose exactly.
+    bpy.context.scene.frame_set(20)
+    bpy.context.view_layer.update()
+    assert ctrl['bd_shoulder_l'] == 0.0 and ctrl['bd_shoulder_r'] == 0.0
+    base = {pb.name: pb.matrix.copy() for pb in arm.pose.bones}
+    rig.match_shoulder(ctrl, 'shoulder_l', key_switch=False)
+    rig.refresh(ctrl)
+    assert max_diff(base, {pb.name: pb.matrix.copy() for pb in arm.pose.bones}) < 5e-4
+    ctl = ctrl.pose.bones['CTRL_shoulder_l']
+    ctl.matrix_basis = Matrix.Rotation(0.5, 4, Vector((0, 0, 1))) @ ctl.matrix_basis
+    rig.refresh(ctrl)
+    moved = (arm.pose.bones['ude1_l_n'].matrix.translation -
+             base['ude1_l_n'].translation).length
+    assert moved > 0.02, moved
+    rig.match_shoulder(ctrl, 'shoulder_l', key_switch=False)
+    ctrl['bd_shoulder_l'] = 0.0
+    rig.refresh(ctrl)
+    assert max_diff(base, {pb.name: pb.matrix.copy() for pb in arm.pose.bones}) < 1e-5
+
+    # Joint limits clamp an extreme IK demand (deep knee fold) while
+    # segment lengths stay rigid; disabling limits restores full range.
+    def knee_flexion():
+        j0 = arm.pose.bones['asi1_l_n'].matrix.translation
+        j1 = arm.pose.bones['asi2_l_n'].matrix.translation
+        j2 = arm.pose.bones['asi3_l_n'].matrix.translation
+        v1 = (j1 - j0).normalized()
+        v2 = (j2 - j1).normalized()
+        return math.degrees(math.acos(max(-1.0, min(1.0, v1.dot(v2)))))
+
+    bpy.context.scene.frame_set(20)
+    bpy.context.view_layer.update()
+    rig.match(ctrl, 'leg_l', 'IK')
+    hip = arm.pose.bones['asi1_l_n'].matrix.translation.copy()
+    foot = ctrl.pose.bones['CTRL_leg_l']
+    fm = foot.matrix.copy()
+    fm.translation = hip + Vector((0.03, -0.06, 0.04))
+    foot.matrix = fm
+    ctrl['bd_limits'] = 0.0
+    rig.refresh(ctrl)
+    free = knee_flexion()
+    ctrl['bd_limits'] = 1.0
+    rig.refresh(ctrl)
+    clamped = knee_flexion()
+    assert free > 150.0 and clamped < free - 20.0, (free, clamped)
+    assert segment_error(arm) < 5e-4
+    rig.match(ctrl, 'leg_l', 'FK')
 
     # Bake reproduces the live rig on the original skeleton, as a new Action.
     bpy.context.scene.frame_set(20)

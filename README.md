@@ -6,6 +6,14 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.8.0:** the control rig gains **spine (waist→chest) and neck→head IK**,
+**shoulder/clavicle controls** and **joint limits**: IK chains (arms, legs,
+spine, neck) solve inside anatomical flexion/hyperextension ranges so joints
+no longer fold into distortions; an out-of-range goal is simply not reached
+and segment lengths stay rigid. Limits guard IK solving only — FK/Action
+playback is never clamped. Blender IK only — **not game IK, terrain contact
+or OPE0**.
+
 **v0.7.0:** persistent **animator control rig** in a separate non-deforming
 armature: same-name FK bones carry the current clip, hand/foot IK goals with
 elbow/knee poles, no-pop Match IK/FK with the switch keyed at the current

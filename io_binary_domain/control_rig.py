@@ -12,9 +12,32 @@ from mathutils import Vector, Matrix
 from bpy.props import BoolProperty, EnumProperty, IntProperty
 
 PREFIX = 'BD Live | '
+# IK/FK chains: limb name -> clone bone names root..end.  The neck chain has
+# only two real bones; its second segment ends at a virtual head-top point.
 LIMBS = {f'{part}_{side}': ([f'asi{i}_{side}_n' for i in (1,2,3)] if part == 'leg'
                            else [f'ude{i}_{side}_n' for i in (1,2,3)])
          for part in ('leg','arm') for side in ('l','r')}
+LIMBS['spine'] = ['kosi_c_n', 'mune_c_n', 'kubi_c_n']   # waist -> chest -> neck base
+LIMBS['neck'] = ['kubi_c_n', 'face_c_n']                # neck -> head
+KINDS = {name: (name.split('_')[0] if name not in ('spine', 'neck') else name)
+         for name in LIMBS}
+LABELS = {'leg_l': 'Leg L (hip-knee-ankle)', 'leg_r': 'Leg R (hip-knee-ankle)',
+          'arm_l': 'Arm L (shoulder-elbow-wrist)', 'arm_r': 'Arm R (shoulder-elbow-wrist)',
+          'spine': 'Spine (waist-chest)', 'neck': 'Neck-Head'}
+# Anatomical bend side in armature-local space (Y up, character faces +Z),
+# used when a chain is perfectly straight and has no bend to measure.
+POLE_FALLBACK = {'leg': (0, 0, 1), 'arm': (0, 0, -1),
+                 'spine': (0, 0, -1), 'neck': (0, 0, -1)}
+# Per-kind IK joint limits in radians: (root, mid) flexion / side / twist.
+LIMIT_PROFILES = {
+    'leg':   {'flex': (2.2, 2.62), 'side': (1.20, 0.90), 'twist': (1.40, 1.20)},
+    'arm':   {'flex': (2.6, 2.62), 'side': (1.40, 1.10), 'twist': (1.60, 1.40)},
+    'spine': {'flex': (0.55, 0.55), 'side': (0.65, 0.65), 'twist': (0.90, 0.90)},
+    'neck':  {'flex': (0.65, 0.55), 'side': (0.70, 0.65), 'twist': (1.00, 0.90)},
+}
+HYPER_EXTENSION = 0.12  # rad of allowed bend past straight, for every hinge
+# Clavicle/shoulder controls: single-bone drivers for kata_*_n.
+SHOULDERS = {'shoulder_l': 'kata_l_n', 'shoulder_r': 'kata_r_n'}
 
 
 def source_and_control(obj):
@@ -64,15 +87,37 @@ def _new_bone(data, name, head, tail, parent=None, matrix=None):
     return b
 
 
-def _pole(a,b,c,size):
+def _pole(a,b,c,size,fallback=(0,0,1)):
     axis = c-a
     bend = b-a-axis*((b-a).dot(axis)/max(axis.length_squared,1e-12))
     if bend.length < 1e-5:
-        bend = Vector((0,0,1))
+        bend = Vector(fallback)
         if abs(axis.normalized().dot(bend)) > .9:
             bend = Vector((1,0,0))
         bend -= axis.normalized()*bend.dot(axis.normalized())
     return b+bend.normalized()*size
+
+
+def _neck_end(matrix, bone):
+    """Current head-top point: a virtual joint above face_c_n."""
+    offset = (bone.tail_local-bone.head_local)
+    if offset.length < 1e-9:
+        offset = Vector((0, 0.12, 0))
+    offset = offset.normalized()*0.12
+    local = bone.matrix_local.to_3x3().inverted_safe() @ offset
+    return matrix.translation + matrix.to_3x3() @ local
+
+
+def _joint_matrices(ctrl, limb):
+    """Evaluated root/mid/end matrices of a chain (virtual end for neck)."""
+    names = LIMBS[limb]
+    mats = [ctrl.pose.bones[n].matrix.copy() for n in names]
+    if KINDS[limb] == 'neck':
+        face = ctrl.pose.bones[names[1]]
+        end = _neck_end(face.matrix, face.bone)
+        mats.append(Matrix.LocRotScale(end, face.matrix.to_quaternion(),
+                                       face.matrix.to_scale()))
+    return mats
 
 
 def _pole_angle(ctrl, limb):
@@ -104,12 +149,133 @@ def _widget(ctrl, label, kind):
     return ob
 
 
+def _apply_limits(ctrl, limb, joints):
+    """Calibrated IK joint limits on the two mechanism bones of a chain.
+
+    Blender's IK limits are not Euler angles: the solver decomposes each
+    segment rotation into a twist about its local Y axis plus a 2D swing
+    vector (sin(theta/2) along local X/Z) and clamps those.  Fixed ranges
+    around zero therefore reject legitimate GMD poses, whose bind frames
+    carry roll/twist.  Instead each allowed interval is the anatomical
+    range measured from straight, widened to include the mechanism's
+    current (creation-time FK) parameters, so the creation pose always
+    stays reachable.  Limits live on the mechanism only and are toggled
+    by the driven bd_limits property; FK/Action playback is not clamped.
+    """
+    kind = KINDS[limb]
+    profile = LIMIT_PROFILES[kind]
+    axis = joints[2]-joints[0]
+    if axis.length < 1e-9:
+        return
+    bend = joints[1]-joints[0]
+    bend -= axis*(bend.dot(axis)/axis.length_squared)
+    if bend.length < 1e-5:
+        bend = Vector(POLE_FALLBACK[kind])
+        bend -= axis.normalized()*(bend.dot(axis.normalized()))
+        if bend.length < 1e-9:
+            return
+    normal = axis.normalized().cross(bend.normalized())
+    if normal.length < 1e-9:
+        return
+    normal.normalize()
+
+    def e(r, row, col):
+        return r.col[col][row]
+
+    for i in (0, 1):
+        pb = ctrl.pose.bones[f'MCH_{limb}_{i}']
+        rest = pb.bone.matrix_local.to_3x3()
+        dots = [abs(rest.col[k].dot(normal)) for k in range(3)]
+        hinge = dots.index(max(dots))
+        # Both segment directions rotate about the bend-plane normal to
+        # close the joint (the normal is defined by root->mid x mid->end),
+        # so flexion has the same armature-space sense for both bones.
+        direction = normal
+        s_local = 1.0 if rest.col[hinge].dot(direction) >= 0 else -1.0
+        r = pb.matrix_basis.to_3x3()
+        tau = 2*math.atan2(e(r, 0, 2)-e(r, 2, 0),
+                           e(r, 0, 0)+e(r, 1, 1)+e(r, 2, 2)+1)
+        tau = (tau+math.pi) % (2*math.pi)-math.pi
+        num = 2*(1+e(r, 1, 1))
+        if num < 1e-4:
+            continue  # segment flipped ~180 deg: solver limits unreliable
+        scale = 1/math.sqrt(num)
+        swing = {0: -e(r, 2, 1)*scale, 2: e(r, 0, 1)*scale}
+        # Flexion side of each component, measured from the actual bent
+        # creation pose when possible: computing it from bind frames
+        # flips sign on mirrored/rotated chains.  Both swing components
+        # get the full flexion radius on their flexion side (the solver
+        # ellipse-clamps the 2D swing vector, so a diagonal bend must not
+        # be choked by the side semi-axis); the hinge keeps a tight
+        # hyperextension side.  On spine/neck bones the hinge can be the
+        # local Y (twist) parameter itself; then flexion is limited
+        # through the twist interval (tau is the local Y angle).
+        params = {0: swing[0], 1: tau, 2: swing[2]}
+        hc = params[hinge]
+        if hinge == 1:
+            flex_sign = (1.0 if hc > 0 else -1.0) if abs(hc) > 0.05 else s_local
+        else:
+            flex_sign = (1.0 if hc > 0 else -1.0) if abs(hc) > 0.03 else -s_local
+        ranges = {}
+        for k in (0, 1, 2):
+            center = params[k]
+            if k == hinge:
+                sign, opp_ang, flex_ang = flex_sign, HYPER_EXTENSION, profile['flex'][i]
+            elif k == 1:
+                sign, opp_ang = 0.0, profile['twist'][i]
+                flex_ang = profile['twist'][i]
+            else:
+                opp_ang = profile['side'][i]
+                flex_ang = profile['flex'][i]
+                sign = (1.0 if center > 0 else -1.0) if abs(center) > 0.05 else 0.0
+
+            def param(angle, k=k):
+                return angle if k == 1 else math.sin(angle/2)
+            if sign > 0:
+                low, high = -param(opp_ang), param(flex_ang)
+            elif sign < 0:
+                low, high = -param(flex_ang), param(opp_ang)
+            else:
+                low, high = -param(opp_ang), param(opp_ang)
+            low, high = min(low, center), max(high, center)
+            # Small safety margin: solver parameters drift slightly
+            # between the calibration pose and other valid poses.
+            margin = 0.10 if k == 1 else 0.02
+            low, high = low-margin, high+margin
+            if k == 1:
+                low, high = max(-math.pi, low), min(math.pi, high)
+            ranges[k] = (low, high)
+        for k, axis_name in enumerate('xyz'):
+            if i == 1 and k == 1 and hinge != 1:
+                # The solver's twist parameter for the end segment sits
+                # near its pi singularity on mirrored chains and swings
+                # wildly between equivalent poses; limiting it rejects
+                # valid animation.  Hinge swing limits still apply.
+                setattr(pb, f'use_ik_limit_{axis_name}', False)
+                continue
+            low, high = ranges[k]
+            if k == 1:
+                ik_min, ik_max = low, high
+            else:
+                # Invert the solver's -sin(angle/2) parameterisation.
+                ik_min = -2*math.asin(max(-1.0, min(1.0, high)))
+                ik_max = -2*math.asin(max(-1.0, min(1.0, low)))
+            setattr(pb, f'ik_min_{axis_name}', ik_min)
+            setattr(pb, f'ik_max_{axis_name}', ik_max)
+            setattr(pb, f'use_ik_limit_{axis_name}', True)
+            driven = pb.driver_add(f'use_ik_limit_{axis_name}').driver
+            driven.type = 'SCRIPTED'; driven.expression = 'value'
+            var = driven.variables.new(); var.name = 'value'
+            var.type = 'SINGLE_PROP'; var.targets[0].id = ctrl
+            var.targets[0].data_path = '["bd_limits"]'
+
 def create(source, ik_default=False):
     if source is None or source.type != 'ARMATURE' or not source.get('gmd_source'):
         raise ValueError('Select an imported GMD armature')
     if source.get('bd_control_rig'):
         raise ValueError('A control rig already exists; select it or remove it first')
     missing = [n for names in LIMBS.values() for n in names if n not in source.data.bones]
+    missing += [n for n in SHOULDERS.values() if n not in source.data.bones]
     if missing or 'center_c_n' not in source.data.bones:
         raise ValueError('Full human skeleton required: '+', '.join(missing))
     if any(not c.mute for pb in source.pose.bones for c in pb.constraints):
@@ -137,6 +303,8 @@ def create(source, ik_default=False):
     prop(ctrl,'bd_enabled',1.0,description='Follow animator rig; zero restores original Action')
     prop(ctrl,'bd_helpers',0.0,description='Approximate twist/bend sharing; not game OPE0')
     for limb in LIMBS: prop(ctrl,'bd_ik_'+limb,0.0,description='0: FK / 1: IK (use Match buttons to avoid jumps)')
+    for key in SHOULDERS: prop(ctrl,'bd_'+key,0.0,description='0: FK clip / 1: shoulder (clavicle) control')
+    prop(ctrl,'bd_limits',1.0,description='Respect anatomical joint limits in IK solving')
     size = max(.1, abs(source.data.bones['center_c_n'].head_local.y))
     created_action = None
     try:
@@ -150,11 +318,27 @@ def create(source, ik_default=False):
             _new_bone(data,original.name,original.head_local,original.tail_local,
                       original.parent.name if original.parent else 'CTRL_body',original.matrix_local)
         for limb,names in LIMBS.items():
-            a,b,c = (source.data.bones[n] for n in names)
+            a,b = (source.data.bones[n] for n in names[:2])
+            c = source.data.bones[names[2]] if len(names) > 2 else None
+            end_bone = c if c is not None else b
+            joints = [a.head_local.copy(), b.head_local.copy()]
+            joints.append(c.head_local.copy() if c is not None else
+                          _neck_end(b.matrix_local, b))
             rootparent = a.parent.name if a.parent else 'CTRL_body'
-            for i,(first,last) in enumerate(((a,b),(b,c))):
-                mechanism = _new_bone(data,f'MCH_{limb}_{i}',first.head_local,last.head_local,
+            for i,first in enumerate((a,b)):
+                mechanism = _new_bone(data,f'MCH_{limb}_{i}',joints[i],joints[i+1],
                           rootparent if i==0 else f'MCH_{limb}_0',first.matrix_local)
+                # Anatomical mechanism frame: local X is the hinge axis
+                # (armature X, the character's mediolateral axis), so the
+                # IK solver's swing/twist limit parameters stay meaningful
+                # instead of following arbitrary GMD bone rolls.
+                seg = joints[i+1]-joints[i]
+                if seg.length > 1e-9:
+                    seg.normalize()
+                    hinge_x = Vector((1,0,0))
+                    hinge_x -= seg*hinge_x.dot(seg)
+                    if hinge_x.length > 1e-6:
+                        mechanism.align_roll(hinge_x.normalized().cross(seg))
                 if i == 1:
                     # Blender's IK solver expects a genuinely connected
                     # two-bone chain; the GMD clone itself stays disconnected.
@@ -163,24 +347,34 @@ def create(source, ik_default=False):
                           f'MCH_{limb}_{i}',first.matrix_local)
             # A location-only end frame on the solved lower segment prevents
             # COPY_TRANSFORMS-to-goal from stretching an unreachable limb.
-            end_frame = _new_bone(data,f'OUT_{limb}_2',c.head_local,c.tail_local,
-                      f'MCH_{limb}_1',c.matrix_local)
+            end_frame = _new_bone(data,f'OUT_{limb}_2',joints[2],
+                      joints[2]+(end_bone.tail_local-end_bone.head_local),
+                      f'MCH_{limb}_1',end_bone.matrix_local)
             end_frame.use_connect = True
             name='CTRL_'+limb
-            _new_bone(data,name,c.head_local,c.head_local+Vector((0,size*.12,0)),'CTRL_global')
+            _new_bone(data,name,joints[2],joints[2]+Vector((0,size*.12,0)),'CTRL_global')
             goalparent=name
             if limb.startswith('leg'):
                 toe = source.data.bones.get('asi4_'+limb[-1]+'_n')
-                heel=Vector((c.head_local.x,0,c.head_local.z-size*.08))
-                tip=toe.head_local.copy() if toe else c.head_local+Vector((0,0,size*.14))
+                heel=Vector((joints[2].x,0,joints[2].z-size*.08))
+                tip=toe.head_local.copy() if toe else joints[2]+Vector((0,0,size*.14))
                 tip.y=0
                 for pivot,point in (('heel',heel),('toe',tip)):
                     pname='MCH_'+limb+'_'+pivot
                     _new_bone(data,pname,point,point+Vector((0,size*.08,0)),goalparent)
                     goalparent=pname
-            _new_bone(data,'MCH_goal_'+limb,c.head_local,c.tail_local,goalparent,c.matrix_local)
-            pole=_pole(a.head_local,b.head_local,c.head_local,size*.5)
+            _new_bone(data,'MCH_goal_'+limb,joints[2],
+                      joints[2]+(end_bone.tail_local-end_bone.head_local),
+                      goalparent,end_bone.matrix_local)
+            pole=_pole(joints[0],joints[1],joints[2],size*.5,
+                       POLE_FALLBACK[KINDS[limb]])
             _new_bone(data,'CTRL_pole_'+limb,pole,pole+Vector((0,size*.1,0)),'CTRL_global')
+        for key,bone_name in SHOULDERS.items():
+            clavicle = source.data.bones[bone_name]
+            _new_bone(data,'CTRL_'+key,clavicle.head_local,
+                      clavicle.head_local+Vector((0,size*.1,0)),'CTRL_global')
+            _new_bone(data,'MCH_'+key,clavicle.head_local,clavicle.tail_local,
+                      'CTRL_'+key,clavicle.matrix_local)
         # Driver bind frames for optional helper sharing; no evaluated back-reference.
         from . import mmo
         from pathlib import Path
@@ -217,11 +411,18 @@ def create(source, ik_default=False):
             ik.pole_angle=_pole_angle(ctrl,limb)
             for i in (0,1):
                 ctrl.pose.bones[f'MCH_{limb}_{i}'].ik_stretch=0
+                if KINDS[limb] == 'neck' and i == 1:
+                    continue  # face_c_n is driven as the neck endpoint below
                 _copy(ctrl.pose.bones[names[i]],ctrl,f'OUT_{limb}_{i}',ctrl,'bd_ik_'+limb)
-            endpoint = ctrl.pose.bones[names[2]]
+            if KINDS[limb] == 'neck':
+                endpoint = ctrl.pose.bones[names[1]]
+                end_subtarget = f'OUT_{limb}_1'
+            else:
+                endpoint = ctrl.pose.bones[names[2]]
+                end_subtarget = f'OUT_{limb}_2'
             location = endpoint.constraints.new('COPY_LOCATION')
             location.name = PREFIX+'IK position '+limb
-            location.target = ctrl; location.subtarget = f'OUT_{limb}_2'
+            location.target = ctrl; location.subtarget = end_subtarget
             location.owner_space = location.target_space = 'WORLD'
             driver(location, ctrl, 'bd_ik_'+limb)
             _copy(endpoint, ctrl, 'MCH_goal_'+limb, ctrl, 'bd_ik_'+limb,
@@ -234,6 +435,8 @@ def create(source, ik_default=False):
                     d=pb.driver_add('rotation_euler',0).driver; d.type='SCRIPTED'; d.expression=expr
                     v=d.variables.new(); v.name='roll'; v.type='SINGLE_PROP'; v.targets[0].id=ctrl
                     v.targets[0].data_path=foot.path_from_id()+'["roll"]'
+        for key,bone_name in SHOULDERS.items():
+            _copy(ctrl.pose.bones[bone_name], ctrl, 'MCH_'+key, ctrl, 'bd_'+key)
         for name in helper_drivers:
             for i in (0,1):
                 _copy(ctrl.pose.bones[name],ctrl,f'MCH_share_{i}_{name}',ctrl,'bd_helpers',1 if i==0 else .5,rotation_only=True)
@@ -248,6 +451,13 @@ def create(source, ik_default=False):
         refresh(ctrl)
         for limb in LIMBS:
             match(ctrl,limb,'IK',False,enable=ik_default)
+        # Limits are calibrated from the just-posed mechanism bases.
+        for limb in LIMBS:
+            joints = [initial[n].translation for n in LIMBS[limb]]
+            if KINDS[limb] == 'neck':
+                face_bone = source.data.bones[LIMBS[limb][1]]
+                joints.append(_neck_end(initial[LIMBS[limb][1]], face_bone))
+            _apply_limits(ctrl, limb, joints)
         # Create followers last, so failures cannot strand the original skeleton.
         for pb in source.pose.bones:
             c=pb.constraints.new('COPY_TRANSFORMS'); c.name=PREFIX+'follow'
@@ -300,41 +510,48 @@ def _calibrate_pole(ctrl, limb, desired, endpoint):
             return None
         return math.atan2(axis.dot(v.cross(wanted)), v.dot(wanted))
 
+    def set_angle(value):
+        # pole_angle is only defined modulo 2pi; keep it inside [-pi, pi]
+        # so Newton steps can cross the wrap instead of clamping there.
+        ik.pole_angle = (value+math.pi) % (2*math.pi)-math.pi
+
     error = signed_error()
     if error is None or abs(error) < 1e-6:
         return
-    ik.pole_angle += 0.1
+    start_angle = ik.pole_angle
+    set_angle(start_angle+0.1)
     probed = signed_error()
     if probed is None:
-        ik.pole_angle -= 0.1
+        set_angle(start_angle)
         return
     sensitivity = (probed-error)/0.1
     if abs(sensitivity) < 1e-6:
-        ik.pole_angle -= 0.1
+        set_angle(start_angle)
         refresh(ctrl)
         return
-    ik.pole_angle -= probed/sensitivity
-    for _ in range(3):
+    set_angle(ik.pole_angle-probed/sensitivity)
+    for _ in range(6):
         error = signed_error()
         if error is None or abs(error) < 1e-6:
             break
-        ik.pole_angle -= error/sensitivity
+        set_angle(ik.pole_angle-error/sensitivity)
     refresh(ctrl)
 
-def _segment_matrix(start, end, reference):
-    """World frame of one mechanism segment: Y along the segment, roll from
-    the corresponding FK bone frame."""
+def _segment_matrix(start, end, hinge):
+    """World frame of one mechanism segment: Y along the segment, local X
+    on the hinge (bend-plane normal) axis."""
     y = end-start
     if y.length < 1e-9:
-        return reference.copy()
-    y.normalize()
-    z = reference.to_3x3().col[2].copy()
-    z -= y*z.dot(y)
-    if z.length < 1e-6:
-        z = reference.to_3x3().col[0].copy()
-        z -= y*z.dot(y)
-    z.normalize()
-    x = y.cross(z)
+        y = Vector((0,1,0))
+    else:
+        y = y.normalized()
+    x = hinge.copy()
+    x -= y*x.dot(y)
+    if x.length < 1e-6:
+        x = Vector((1,0,0))
+        x -= y*x.dot(y)
+    x.normalize()
+    z = x.cross(y)
     result = Matrix(((x[0], y[0], z[0]), (x[1], y[1], z[1]), (x[2], y[2], z[2]))).to_4x4()
     result.translation = start
     return result
@@ -363,11 +580,24 @@ def _position_ik_controls(ctrl, limb, matrices, key=True):
     # segments onto the FK solution first, breaking the singularity on the
     # correct (pole) side; the live solver starts from this basis.
     joints = [m.translation for m in matrices]
-    for i in (0, 1):
-        ctrl.pose.bones[f'MCH_{limb}_{i}'].matrix = _segment_matrix(
-            joints[i], joints[i+1], matrices[i])
-        refresh(ctrl)
-    _calibrate_pole(ctrl, limb, matrices[1].translation, matrices[2].translation)
+    hinge = (joints[1]-joints[0]).cross(joints[2]-joints[1])
+    if hinge.length < 1e-6:
+        hinge = (joints[2]-joints[0]).cross(
+            pole.matrix.translation-joints[0])
+    if hinge.length < 1e-6:
+        hinge = Vector((1,0,0))
+    hinge.normalize()
+    for _pass in (0, 1):
+        for i in (0, 1):
+            ctrl.pose.bones[f'MCH_{limb}_{i}'].matrix = _segment_matrix(
+                joints[i], joints[i+1], hinge)
+            refresh(ctrl)
+        if _pass == 0:
+            _calibrate_pole(ctrl, limb, matrices[1].translation,
+                            matrices[2].translation)
+        # Second pass: segment bases are set against the *calibrated*
+        # parent evaluation, so their local rotations stay clean hinge
+        # rotations instead of absorbing the pre-calibration solver pose.
     # Pole direction fixes the two joint positions, but not necessarily the
     # axial frame of either segment.  The OUT bones absorb that difference.
     for i in (0, 1):
@@ -416,13 +646,14 @@ def _key_previous_switch(ctrl, limb, direction):
 
 def match(ctrl,limb,direction,key=True,enable=True):
     names=LIMBS[limb]; refresh(ctrl)
-    matrices=[ctrl.pose.bones[n].matrix.copy() for n in names]
     if key:
         _key_previous_switch(ctrl, limb, direction)
     if direction=='IK':
+        matrices=_joint_matrices(ctrl, limb)
         _position_ik_controls(ctrl, limb, matrices, key=key)
         ctrl['bd_ik_'+limb]=1.0 if enable else 0.0
     else:
+        matrices=[ctrl.pose.bones[n].matrix.copy() for n in names]
         ctrl['bd_ik_'+limb]=0.0; refresh(ctrl)
         for name,mat in zip(names,matrices):
             pb=ctrl.pose.bones[name]; pb.matrix=mat; refresh(ctrl)
@@ -431,6 +662,32 @@ def match(ctrl,limb,direction,key=True,enable=True):
                 for path in ('location','rotation_quaternion','scale'): pb.keyframe_insert(data_path=path)
     if key: ctrl.keyframe_insert(data_path='["bd_ik_'+limb+'"]')
     refresh(ctrl)
+
+
+def match_shoulder(ctrl, key, key_switch=True):
+    """Place a clavicle control on the current kata pose and enable it."""
+    refresh(ctrl)
+    target = ctrl.pose.bones[SHOULDERS[key]].matrix.copy()
+    control = ctrl.pose.bones['CTRL_'+key]
+    frame = ctrl.pose.bones['MCH_'+key].matrix
+    offset = control.matrix.inverted_safe() @ frame
+    if key_switch:
+        scene = bpy.context.scene
+        action = ctrl.animation_data.action if ctrl.animation_data else None
+        start = int(action.frame_range[0]) if action else scene.frame_current
+        if scene.frame_current > start:
+            ctrl['bd_'+key] = 0.0
+            ctrl.keyframe_insert(data_path=f'["bd_{key}"]',
+                                 frame=scene.frame_current-1)
+    control.matrix = target @ offset.inverted_safe()
+    ctrl['bd_'+key] = 1.0
+    refresh(ctrl)
+    if key_switch:
+        control.rotation_mode = 'QUATERNION'
+        for path in ('location', 'rotation_quaternion', 'scale'):
+            control.keyframe_insert(data_path=path)
+        ctrl.keyframe_insert(data_path=f'["bd_{key}"]')
+        refresh(ctrl)
 
 
 def sync_action(source):
@@ -455,6 +712,8 @@ def sync_action(source):
                 pb['roll'] = 0.0
     for limb in LIMBS:
         ctrl['bd_ik_'+limb] = 0.0
+    for key in SHOULDERS:
+        ctrl['bd_'+key] = 0.0
     ctrl['bd_enabled'] = 1.0
     refresh(ctrl)
     for limb in LIMBS:
@@ -480,7 +739,7 @@ def convert_to_ik(ctrl, start, end, limbs=None):
             names = LIMBS[limb]
             for frame in range(start, end+1):
                 scene.frame_set(frame)
-                matrices = [ctrl.pose.bones[n].matrix.copy() for n in names]
+                matrices = _joint_matrices(ctrl, limb)
                 _position_ik_controls(ctrl, limb, matrices, key=True)
             ctrl['bd_ik_'+limb] = 1.0
             ctrl.keyframe_insert(data_path=f'["bd_ik_{limb}"]', frame=start)
@@ -603,6 +862,20 @@ class BDOMAIN_OT_match_controls(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class BDOMAIN_OT_match_shoulder(bpy.types.Operator):
+    bl_idname='bdomain.match_shoulder'
+    bl_label='Match shoulder (clavicle) control'
+    bl_options={'REGISTER','UNDO'}
+    shoulder: EnumProperty(items=[(n,n.replace('_',' ').title(),'') for n in SHOULDERS])
+    def execute(self,context):
+        source,ctrl=source_and_control(context.object)
+        if not ctrl: return {'CANCELLED'}
+        try: match_shoulder(ctrl,self.shoulder)
+        except Exception as exc:
+            self.report({'ERROR'},str(exc)); return {'CANCELLED'}
+        return {'FINISHED'}
+
+
 class BDOMAIN_OT_sync_controls(bpy.types.Operator):
     bl_idname='bdomain.sync_controls'
     bl_label='Copy source Action to FK controls'
@@ -638,7 +911,7 @@ class BDOMAIN_OT_convert_controls(bpy.types.Operator):
         try: convert_to_ik(ctrl,self.start,self.end)
         except Exception as exc:
             self.report({'ERROR'},str(exc)); return {'CANCELLED'}
-        self.report({'INFO'},'FK clip keyed onto IK controllers for all four limbs')
+        self.report({'INFO'},'FK clip keyed onto IK controllers for all chains')
         return {'FINISHED'}
 
 
@@ -698,10 +971,17 @@ def draw(layout,obj):
     box.label(text='Animated clips start in FK; IK Match/Convert avoids pops')
     box.label(text='In IK, CTRL_body moves pelvis; feet stay planted')
     for limb in LIMBS:
-        row=box.row(align=True);row.prop(ctrl,'["bd_ik_'+limb+'"]',text=limb.replace('_',' ').title(),slider=True)
+        row=box.row(align=True);row.prop(ctrl,'["bd_ik_'+limb+'"]',text=LABELS[limb],slider=True)
         for direction in ('IK','FK'):
             op=row.operator('bdomain.match_controls',text='Match '+direction)
             op.limb=limb;op.direction=direction
+    for key in SHOULDERS:
+        row=box.row(align=True)
+        row.prop(ctrl,'["bd_'+key+'"]',text=key.replace('_',' ').title()+' (clavicle)',slider=True)
+        op=row.operator('bdomain.match_shoulder',text='Match')
+        op.shoulder=key
+    box.prop(ctrl,'["bd_limits"]',text='Joint limits (IK only)',slider=True)
+    box.label(text='CTRL_pole_* aim knees / elbows / spine / neck')
     for side in ('l','r'):
         foot=ctrl.pose.bones['CTRL_leg_'+side]
         box.prop(foot,'["roll"]',text='Foot '+side.upper()+' roll (rad)')
@@ -714,6 +994,7 @@ def draw(layout,obj):
     box.label(text='Not game IK/terrain collision')
 
 
-CLASSES=(BDOMAIN_OT_create_controls,BDOMAIN_OT_match_controls,BDOMAIN_OT_sync_controls,
+CLASSES=(BDOMAIN_OT_create_controls,BDOMAIN_OT_match_controls,BDOMAIN_OT_match_shoulder,
+         BDOMAIN_OT_sync_controls,
          BDOMAIN_OT_convert_controls,BDOMAIN_OT_remove_controls,
          BDOMAIN_OT_bake_controls,BDOMAIN_OT_select_controls)
