@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.8.1
+# Binary Domain Blender addon — v0.8.2
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -284,7 +284,14 @@ the controls through world-space constraints that can be disabled or removed.
 - Mechanism bases are pre-bent slightly toward the pole when the FK
   chain is (near-)straight, so rest-pose legs leave the pole-IK
   singularity instead of ignoring the foot control or flipping through
-  the hip when `CTRL_body` crouches.
+  the hip when `CTRL_body` crouches. Near-straight chains take their
+  pole/hinge direction from the anatomical fallback, not from
+  sub-degree pose noise. Pressing **Match IK** recalibrates a limb's
+  joint limits in place, which also repairs rigs saved by older addon
+  versions — no recreation needed. When a flexion side cannot be
+  measured from the creation pose, the fold radius is applied
+  symmetrically: the pole still aims the bend and the angle stays
+  bounded, but hyperextension is then bounded by the same radius.
 - **Joint limits (IK solving)**: each mechanism joint solves inside an
   anatomical range — knees/elbows flex deep but cannot hyperextend or fold
   past ~150°, spine/neck bend is modest, twist is capped. Limits are

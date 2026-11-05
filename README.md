@@ -6,6 +6,14 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.8.2:** IK robustness fixes — near-straight chains take the pole/hinge
+direction from the anatomical fallback instead of sub-degree pose noise
+(knees no longer bend sideways), mechanism bases are set through the rest
+frame (no 180° basis flips), and limit calibration only trusts a measured
+flexion side (otherwise the fold radius is symmetric, so a chain can never
+be pinned by a guessed sign). **Match IK recalibrates limits in place**,
+so rigs saved by older versions repair without recreation.
+
 **v0.8.1:** rest-pose IK fix — perfectly straight bind legs no longer stall
 or flip the pole IK (mechanism bases get a slight pole-side pre-bend, and
 root ball joints no longer guess a flexion side for their limits, which

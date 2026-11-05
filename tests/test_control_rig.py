@@ -245,9 +245,38 @@ def fixture_test():
         assert drift < 1e-3, (s, drift)
         knee = arm.pose.bones[f'asi2_{s}_n'].matrix.translation.copy()
         assert knee.z > 0.1, (s, knee)  # knees forward in the crouch
+    # A rig saved by an older addon version keeps its limit values as
+    # data; if those pin the chain, Match IK must recalibrate in place.
+    body.matrix_basis.identity()
+    rig.refresh(ctrl)
+    for i in (0, 1):
+        pb = ctrl.pose.bones[f'MCH_leg_l_{i}']
+        for ax in 'xyz':
+            setattr(pb, f'ik_min_{ax}', -0.05)
+            setattr(pb, f'ik_max_{ax}', 0.05)
+    rig.refresh(ctrl)
+    ankle0 = arm.pose.bones['asi3_l_n'].matrix.translation.copy()
+    fm = foot.matrix.copy()
+    fm.translation.y += 0.25
+    foot.matrix = fm
+    rig.refresh(ctrl)
+    stuck = (arm.pose.bones['asi3_l_n'].matrix.translation - ankle0).y
+    assert stuck < 0.05, stuck  # legacy limits really do pin the leg
+    rig.match(ctrl, 'leg_l', 'IK', key=False)
+    ankle0 = arm.pose.bones['asi3_l_n'].matrix.translation.copy()
+    fm = foot.matrix.copy()
+    fm.translation.y += 0.25
+    foot.matrix = fm
+    rig.refresh(ctrl)
+    lifted = (arm.pose.bones['asi3_l_n'].matrix.translation - ankle0).y
+    assert lifted > 0.15, lifted  # recalibrated limits free the chain
+    path = 'pose.bones["MCH_leg_l_0"].use_ik_limit_x'
+    assert sum(1 for d in ctrl.animation_data.drivers
+               if d.data_path == path) == 1  # no stacked duplicate drivers
     rig.remove(arm)
     print('PASS: FK preservation, IK match/convert, planted feet, foot roll, '
-          'helpers, bake, save/reopen, removal, rest-pose IK', flush=True)
+          'helpers, bake, save/reopen, removal, rest-pose IK, limit repair',
+          flush=True)
 
 
 if __name__ == '__main__':

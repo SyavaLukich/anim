@@ -36,6 +36,7 @@ LIMIT_PROFILES = {
     'neck':  {'flex': (0.65, 0.55), 'side': (0.70, 0.65), 'twist': (1.00, 0.90)},
 }
 HYPER_EXTENSION = 0.12  # rad of allowed bend past straight, for every hinge
+RIG_VERSION = 'v0.8.2'
 # Clavicle/shoulder controls: single-bone drivers for kata_*_n.
 SHOULDERS = {'shoulder_l': 'kata_l_n', 'shoulder_r': 'kata_r_n'}
 
@@ -90,7 +91,10 @@ def _new_bone(data, name, head, tail, parent=None, matrix=None):
 def _pole(a,b,c,size,fallback=(0,0,1)):
     axis = c-a
     bend = b-a-axis*((b-a).dot(axis)/max(axis.length_squared,1e-12))
-    if bend.length < 1e-5:
+    if bend.length < 0.02*axis.length:
+        # Near-straight chain: the measured bend direction is numerical
+        # noise (a fraction of a degree) and would put the pole on a
+        # random side; use the anatomical fallback instead.
         bend = Vector(fallback)
         if abs(axis.normalized().dot(bend)) > .9:
             bend = Vector((1,0,0))
@@ -167,14 +171,18 @@ def _apply_limits(ctrl, limb, joints):
     axis = joints[2]-joints[0]
     if axis.length < 1e-9:
         return
-    bend = joints[1]-joints[0]
+    seg1 = joints[1]-joints[0]
+    bend = seg1.copy()
     bend -= axis*(bend.dot(axis)/axis.length_squared)
-    if bend.length < 1e-5:
+    if bend.length < 0.02*axis.length:
         bend = Vector(POLE_FALLBACK[kind])
         bend -= axis.normalized()*(bend.dot(axis.normalized()))
         if bend.length < 1e-9:
             return
-    normal = axis.normalized().cross(bend.normalized())
+    # Hinge axis: flexion rotates seg1 toward the bend side, so the
+    # (right-handed) hinge is bend_dir x seg1 -- not axis x bend_dir,
+    # which points the opposite way and mirrors the flexion side.
+    normal = bend.normalized().cross(seg1.normalized())
     if normal.length < 1e-9:
         return
     normal.normalize()
@@ -213,9 +221,11 @@ def _apply_limits(ctrl, limb, joints):
         params = {0: swing[0], 1: tau, 2: swing[2]}
         hc = params[hinge]
         if hinge == 1:
-            flex_sign = (1.0 if hc > 0 else -1.0) if abs(hc) > 0.05 else s_local
+            hinge_measured = abs(hc) > 0.05
+            flex_sign = (1.0 if hc > 0 else -1.0) if hinge_measured else s_local
         else:
-            flex_sign = (1.0 if hc > 0 else -1.0) if abs(hc) > 0.03 else -s_local
+            hinge_measured = abs(hc) > 0.03
+            flex_sign = (1.0 if hc > 0 else -1.0) if hinge_measured else -s_local
         ranges = {}
         for k in (0, 1, 2):
             center = params[k]
@@ -231,12 +241,14 @@ def _apply_limits(ctrl, limb, joints):
 
             def param(angle, k=k):
                 return angle if k == 1 else math.sin(angle/2)
-            if k == hinge and i == 0:
-                # Root joints (hip/shoulder/spine base) are ball joints:
-                # at a straight creation pose the flexion side cannot be
-                # measured reliably, and guessing it pins the whole chain
-                # (a leg that cannot fold).  Give roots the flexion
-                # radius on both sides; mid joints keep the tight
+            if k == hinge and (i == 0 or not hinge_measured):
+                # Root joints (hip/shoulder/spine base) are ball joints,
+                # and on a straight/flipped creation pose the flexion
+                # side of a mid joint cannot be measured reliably either:
+                # guessing it pins the whole chain (a leg that cannot
+                # fold).  Give those the flexion radius on both sides;
+                # the pole still aims the bend, and the fold angle stays
+                # bounded.  A clearly bent creation pose keeps the tight
                 # hyperextension side.
                 low, high = -param(flex_ang), param(flex_ang)
             elif sign > 0:
@@ -271,6 +283,14 @@ def _apply_limits(ctrl, limb, joints):
             setattr(pb, f'ik_min_{axis_name}', ik_min)
             setattr(pb, f'ik_max_{axis_name}', ik_max)
             setattr(pb, f'use_ik_limit_{axis_name}', True)
+            # Recalibration (Match on an older rig) must not stack
+            # duplicate drivers on the same property.
+            path = f'pose.bones["{pb.name}"].use_ik_limit_{axis_name}'
+            adata = ctrl.animation_data
+            if adata:
+                for fcurve in list(adata.drivers):
+                    if fcurve.data_path == path:
+                        adata.drivers.remove(fcurve)
             driven = pb.driver_add(f'use_ik_limit_{axis_name}').driver
             driven.type = 'SCRIPTED'; driven.expression = 'value'
             var = driven.variables.new(); var.name = 'value'
@@ -459,13 +479,6 @@ def create(source, ik_default=False):
         refresh(ctrl)
         for limb in LIMBS:
             match(ctrl,limb,'IK',False,enable=ik_default)
-        # Limits are calibrated from the just-posed mechanism bases.
-        for limb in LIMBS:
-            joints = [initial[n].translation for n in LIMBS[limb]]
-            if KINDS[limb] == 'neck':
-                face_bone = source.data.bones[LIMBS[limb][1]]
-                joints.append(_neck_end(initial[LIMBS[limb][1]], face_bone))
-            _apply_limits(ctrl, limb, joints)
         # Create followers last, so failures cannot strand the original skeleton.
         for pb in source.pose.bones:
             c=pb.constraints.new('COPY_TRANSFORMS'); c.name=PREFIX+'follow'
@@ -565,6 +578,26 @@ def _segment_matrix(start, end, hinge):
     return result
 
 
+def _set_bone_matrix(pb, matrix):
+    """Set a pose bone's armature-space matrix via its basis directly.
+
+    The PoseBone.matrix setter decomposes against the *evaluated* parent
+    frame; for connected mechanism bones under a live IK solver that
+    decomposition can roll the basis 180 degrees about the bone axis
+    (positions stay right, the basis flips), which poisons the solver's
+    swing/twist limit decomposition.  Converting through the rest frame
+    keeps the basis clean.
+    """
+    bone = pb.bone
+    if pb.parent is not None:
+        pb.matrix_basis = bone.convert_local_to_pose(
+            matrix, bone.matrix_local, parent_matrix=pb.parent.matrix,
+            parent_matrix_local=pb.parent.bone.matrix_local, invert=True)
+    else:
+        pb.matrix_basis = bone.convert_local_to_pose(
+            matrix, bone.matrix_local, invert=True)
+
+
 def _position_ik_controls(ctrl, limb, matrices, key=True):
     """Place goal, pole and axial compensation frames on an FK limb pose."""
     control = ctrl.pose.bones['CTRL_'+limb]
@@ -609,16 +642,20 @@ def _position_ik_controls(ctrl, limb, matrices, key=True):
             joints[1] += pole_dir.normalized() * \
                 (0.008*min(seg1.length, seg2.length))
     hinge = (joints[1]-joints[0]).cross(joints[2]-joints[1])
-    if hinge.length < 1e-6:
-        hinge = (joints[2]-joints[0]).cross(
-            pole.matrix.translation-joints[0])
+    if hinge.length < 0.05*seg1.length*seg2.length:
+        # Near-straight: hinge from the (anatomical) pole instead of the
+        # noise-dominated joint cross product.
+        hinge = (pole.matrix.translation-joints[1]).cross(
+            joints[2]-joints[0])
     if hinge.length < 1e-6:
         hinge = Vector((1,0,0))
     hinge.normalize()
     for _pass in (0, 1):
         for i in (0, 1):
-            ctrl.pose.bones[f'MCH_{limb}_{i}'].matrix = _segment_matrix(
-                joints[i], joints[i+1], hinge)
+            mechanism = ctrl.pose.bones[f'MCH_{limb}_{i}']
+            refresh(ctrl)
+            _set_bone_matrix(mechanism, _segment_matrix(
+                joints[i], joints[i+1], hinge))
             refresh(ctrl)
         if _pass == 0:
             _calibrate_pole(ctrl, limb, matrices[1].translation,
@@ -634,7 +671,9 @@ def _position_ik_controls(ctrl, limb, matrices, key=True):
         # its axial orientation is compensated; absorbing a positional error
         # here would let the displayed segment lengths drift during motion.
         location, rotation, scale = matrices[i].decompose()
-        out.matrix = Matrix.LocRotScale(out.head.copy(), rotation, scale)
+        refresh(ctrl)
+        _set_bone_matrix(out, Matrix.LocRotScale(out.head.copy(),
+                                                 rotation, scale))
         refresh(ctrl)
         if key:
             out.rotation_mode = 'QUATERNION'
@@ -679,6 +718,9 @@ def match(ctrl,limb,direction,key=True,enable=True):
     if direction=='IK':
         matrices=_joint_matrices(ctrl, limb)
         _position_ik_controls(ctrl, limb, matrices, key=key)
+        # Rigs saved by older versions keep their limit values as data;
+        # recalibrating here repairs them without recreating the rig.
+        _apply_limits(ctrl, limb, [m.translation for m in matrices])
         ctrl['bd_ik_'+limb]=1.0 if enable else 0.0
     else:
         matrices=[ctrl.pose.bones[n].matrix.copy() for n in names]
@@ -765,6 +807,9 @@ def convert_to_ik(ctrl, start, end, limbs=None):
         refresh(ctrl)
         for limb in limbs:
             names = LIMBS[limb]
+            scene.frame_set(start)
+            _apply_limits(ctrl, limb,
+                          [m.translation for m in _joint_matrices(ctrl, limb)])
             for frame in range(start, end+1):
                 scene.frame_set(frame)
                 matrices = _joint_matrices(ctrl, limb)
@@ -988,7 +1033,7 @@ class BDOMAIN_OT_select_controls(bpy.types.Operator):
 def draw(layout,obj):
     source,ctrl=source_and_control(obj)
     if source is None or not source.get('gmd_source'): return
-    box=layout.box();box.label(text='Animator controls (Blender IK)',icon='ARMATURE_DATA')
+    box=layout.box();box.label(text='Animator controls (Blender IK) '+RIG_VERSION,icon='ARMATURE_DATA')
     if not ctrl:
         box.operator('bdomain.create_controls'); return
     box.prop(ctrl,'["bd_enabled"]',text='Live rig',slider=True)
