@@ -8,7 +8,7 @@ import json
 import math
 import uuid
 import bpy
-from mathutils import Vector, Matrix
+from mathutils import Vector, Matrix, Quaternion
 from bpy.props import BoolProperty, EnumProperty, IntProperty
 
 PREFIX = 'BD Live | '
@@ -36,7 +36,7 @@ LIMIT_PROFILES = {
     'neck':  {'flex': (0.65, 0.55), 'side': (0.70, 0.65), 'twist': (1.00, 0.90)},
 }
 HYPER_EXTENSION = 0.12  # rad of allowed bend past straight, for every hinge
-RIG_VERSION = 'v0.8.4'
+RIG_VERSION = 'v0.8.5'
 # Clavicle/shoulder controls: single-bone drivers for kata_*_n.
 SHOULDERS = {'shoulder_l': 'kata_l_n', 'shoulder_r': 'kata_r_n'}
 
@@ -391,6 +391,15 @@ def create(source, ik_default=False):
                           f'MCH_{limb}_{i}',first.matrix_local)
             # A location-only end frame on the solved lower segment prevents
             # COPY_TRANSFORMS-to-goal from stretching an unreachable limb.
+            if KINDS[limb] == 'arm':
+                # Wrist frame rigidly attached to the forearm segment:
+                # in IK the hand follows the forearm (plus the hand
+                # control's own rotation, applied as an offset), instead
+                # of keeping the control's world orientation and bending
+                # passively at the wrist.
+                _new_bone(data,f'MCH_hand_{limb}',joints[2],
+                          joints[2]+(end_bone.tail_local-end_bone.head_local),
+                          f'MCH_{limb}_1',end_bone.matrix_local)
             end_frame = _new_bone(data,f'OUT_{limb}_2',joints[2],
                       joints[2]+(end_bone.tail_local-end_bone.head_local),
                       f'MCH_{limb}_1',end_bone.matrix_local)
@@ -449,6 +458,13 @@ def create(source, ik_default=False):
             _assign_momo_action(ctrl,created_action)
         for limb,names in LIMBS.items():
             ik=ctrl.pose.bones['MCH_'+limb+'_1'].constraints.new('IK')
+            if KINDS[limb] == 'arm':
+                wrist = ctrl.pose.bones[f'MCH_hand_{limb}']
+                offset = wrist.constraints.new('COPY_ROTATION')
+                offset.name = PREFIX+'wrist offset '+limb
+                offset.target = ctrl; offset.subtarget = 'CTRL_'+limb
+                offset.target_space = 'LOCAL'; offset.owner_space = 'LOCAL'
+                offset.mix_mode = 'AFTER'
             ik.name=PREFIX+'IK '+limb; ik.target=ctrl; ik.subtarget='MCH_goal_'+limb
             ik.pole_target=ctrl; ik.pole_subtarget='CTRL_pole_'+limb
             ik.chain_count=2; ik.use_tail=True; ik.use_stretch=False
@@ -469,8 +485,10 @@ def create(source, ik_default=False):
             location.target = ctrl; location.subtarget = end_subtarget
             location.owner_space = location.target_space = 'WORLD'
             driver(location, ctrl, 'bd_ik_'+limb)
-            _copy(endpoint, ctrl, 'MCH_goal_'+limb, ctrl, 'bd_ik_'+limb,
-                  rotation_only=True)
+            _copy(endpoint, ctrl,
+                  f'MCH_hand_{limb}' if KINDS[limb] == 'arm'
+                  else 'MCH_goal_'+limb,
+                  ctrl, 'bd_ik_'+limb, rotation_only=True)
             if limb.startswith('leg'):
                 foot=ctrl.pose.bones['CTRL_'+limb]
                 prop(foot,'roll',0.0,-1.3,1.3,'Foot roll in radians: negative heel / positive toe')
@@ -735,6 +753,21 @@ def _position_ik_controls(ctrl, limb, matrices, key=True):
             out.rotation_mode = 'QUATERNION'
             for path in ('location', 'rotation_quaternion', 'scale'):
                 out.keyframe_insert(data_path=path)
+    if KINDS[limb] == 'arm':
+        # Pin the wrist frame to the FK wrist at this pose (it then
+        # follows the solved forearm rigidly), and make the control's
+        # own rotation the zero reference for the wrist offset, so a
+        # plain translation of the hand control never bends the wrist.
+        hand = ctrl.pose.bones[f'MCH_hand_{limb}']
+        refresh(ctrl)
+        _set_bone_matrix(hand, matrices[2])
+        loc, _rot, scale = control.matrix_basis.decompose()
+        control.matrix_basis = Matrix.LocRotScale(loc, Quaternion(), scale)
+        refresh(ctrl)
+        if key:
+            hand.rotation_mode = 'QUATERNION'
+            for path in ('location', 'rotation_quaternion', 'scale'):
+                hand.keyframe_insert(data_path=path)
     if key:
         # The solver starts from the mechanism bases, so they are part of
         # the converted pose; leaving them at the last frame's values would
@@ -828,8 +861,22 @@ def match(ctrl,limb,direction,key=True,enable=True):
                     ctrl['bd_ik_'+name] = value
                 refresh(ctrl)
                 goal = ctrl.pose.bones['MCH_goal_'+dep].matrix
-                if max(abs(goal[i][j]-dep_matrices[2][i][j])
-                       for i in range(4) for j in range(4)) <= 2e-3:
+                if KINDS[dep] == 'arm':
+                    # Arm goals carry no orientation reference any more
+                    # (the wrist follows the forearm): "unposed" means
+                    # the control was neither moved nor rotated.
+                    _loc, dep_quat, _scale = \
+                        ctrl.pose.bones['CTRL_'+dep].matrix_basis.decompose()
+                    unposed = (
+                        (goal.translation-dep_matrices[2].translation).length
+                        <= 2e-3
+                        and dep_quat.rotation_difference(Quaternion()).angle
+                        <= 0.05)
+                else:
+                    unposed = max(abs(goal[i][j]-dep_matrices[2][i][j])
+                                  for i in range(4)
+                                  for j in range(4)) <= 2e-3
+                if unposed:
                     _settle(ctrl, dep, dep_matrices, key)
     else:
         matrices=[ctrl.pose.bones[n].matrix.copy() for n in names]

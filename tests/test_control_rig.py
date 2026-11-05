@@ -273,6 +273,29 @@ def fixture_test():
     path = 'pose.bones["MCH_leg_l_0"].use_ik_limit_x'
     assert sum(1 for d in ctrl.animation_data.drivers
                if d.data_path == path) == 1  # no stacked duplicate drivers
+    # Wrist: translating the hand control must not bend the wrist (the
+    # hand follows the forearm); rotating the control adds the offset.
+    import math as _math
+    def _wq(n1, n2):
+        return arm.pose.bones[n1].matrix.to_quaternion().rotation_difference(
+            arm.pose.bones[n2].matrix.to_quaternion()).angle
+    rig.match(ctrl, 'arm_l', 'IK', key=False)
+    wrist0 = _wq('ude2_l_n', 'ude3_l_n')
+    hand_ctrl = ctrl.pose.bones['CTRL_arm_l']
+    hm = hand_ctrl.matrix.copy()
+    hm.translation.y += 0.2
+    hm.translation.z += 0.15
+    hand_ctrl.matrix = hm
+    rig.refresh(ctrl)
+    assert abs(_wq('ude2_l_n', 'ude3_l_n') - wrist0) < 0.1, wrist0
+    hand_ctrl.matrix_basis = hand_ctrl.matrix_basis @ Matrix.Rotation(
+        0.6, 4, Vector((1, 0, 0)))
+    rig.refresh(ctrl)
+    assert abs(_wq('ude2_l_n', 'ude3_l_n') - wrist0) > 0.15
+    hand_ctrl.matrix_basis = hand_ctrl.matrix_basis @ Matrix.Rotation(
+        -0.6, 4, Vector((1, 0, 0)))
+    rig.refresh(ctrl)
+
     # A twisted IK state (rolled spine solution saved by an older
     # version) must not become its own reference: Match IK reads the FK
     # bases and restores the untwisted pose.

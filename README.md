@@ -6,6 +6,13 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.8.5:** wrist behaviour in IK — the hand now follows the forearm
+segment (new `MCH_hand_*` frame) instead of keeping the control's world
+orientation, so translating the hand control no longer bends the wrist
+passively (was 55–63° in a raised-arm pose; now the bind 12°). Rotating
+`CTRL_arm_*` applies an additive wrist offset. Feet keep
+control orientation, as planted feet require.
+
 **v0.8.4:** Match IK is now a true repair operation — mechanism bases are
 posed with the solver muted (canonical anchoring), each matched limb is
 settled onto its FK reference under the final blend state (Blender's IK

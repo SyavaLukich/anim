@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.8.4
+# Binary Domain Blender addon — v0.8.5
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -303,6 +303,10 @@ the controls through world-space constraints that can be disabled or removed.
 - `CTRL_global` moves the whole rig; `CTRL_body` moves the pelvis/torso.
   Hand/foot goal controls and elbow/knee pole controls live under
   `CTRL_global`, so in IK the feet stay planted while the body moves.
+  Foot orientation follows `CTRL_leg_*` (needed for planting); hand
+  orientation instead follows the forearm segment, with `CTRL_arm_*`
+  rotation applied as an additive wrist offset — translating the hand
+  control never bends the wrist by itself.
 - **Match IK / Match FK** buttons place the controls on the current limb
   pose and key the IK/FK switch at the current frame (with the previous
   state keyed one frame earlier), so switching does not pop. Matching is
