@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 1, 3),
+    "version": (0, 1, 4),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -88,6 +88,9 @@ def _make_materials(g, basedir):
         bsdf = nt.nodes.new('ShaderNodeBsdfPrincipled')
         bsdf.location = (-300, 0)
         nt.links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
+        uv_node = nt.nodes.new('ShaderNodeUVMap')
+        uv_node.uv_map = 'UVMap'
+        uv_node.location = (-950, 0)
         slot_names = []
         diffuse_connected = False
         for s, tex in enumerate(m['tex']):
@@ -102,6 +105,7 @@ def _make_materials(g, basedir):
             img = bpy.data.images.load(path, check_existing=True)
             texn = nt.nodes.new('ShaderNodeTexImage')
             texn.image = img
+            nt.links.new(uv_node.outputs['UV'], texn.inputs['Vector'])
             texn.location = (-700, -250 * s)
             low = tname.lower()
             if '(n)' in low:
@@ -248,17 +252,17 @@ def load_gmd(context, filepath, import_momo=None, rig_mma=None, bake_euler=False
         _set_custom_normals(me, normals)
         # uv layers
         if stride >= 24:
-            uvl = me.uv_layers.new(name='UVMap')
-            uv2l = me.uv_layers.new(name='UV2') if stride == 40 else None
-            for poly in me.polygons:
-                for li in poly.loop_indices:
-                    vi = me.loops[li].vertex_index
-                    v = order[vi]
-                    dv = g.decode_vertex(m.stream, v)
-                    if dv['uv']:
-                        uvl.data[li].uv = (dv['uv'][0], 1.0 - dv['uv'][1])
-                    if uv2l is not None and dv['uv2']:
-                        uv2l.data[li].uv = (dv['uv2'][0], 1.0 - dv['uv2'][1])
+            me.uv_layers.new(name='UVMap')
+            # No speculative empty UV2: it can become the active UV set.
+            # Fill via a freshly fetched layer, not a handle invalidated by
+            # allocating another CustomData layer.
+            uv_values = []
+            for loop in me.loops:
+                dv = g.decode_vertex(m.stream, order[loop.vertex_index])
+                uv_values.extend((dv['uv'][0], 1.0 - dv['uv'][1]))
+            me.uv_layers['UVMap'].data.foreach_set('uv', uv_values)
+            me.uv_layers.active_index = 0
+            me.uv_layers['UVMap'].active_render = True
         # skin weights (groups for deformation; raw attrs are the export source)
         pal = g.palette_bones(m)
         for i, v in enumerate(order):

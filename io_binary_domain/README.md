@@ -130,3 +130,13 @@ basic diffuse preview, not a recreation of the original game shaders.
 A local Cycles render in Blender 4.5 confirms improved face/clothing mapping,
 but residual overlapping/variant geometry artifacts remain (notably chest
 and knee details). Blender 5.1 has not been locally validated.
+
+## Explicit UV selection (v0.1.4)
+
+Only the verified `UVMap` layer is created. Previous versions still created
+an empty `UV2` for 40-byte records, allowing an unintended UV set to be used.
+Every image texture now explicitly receives coordinates from a `UVMap` node,
+and `UVMap` is selected for editing and rendering. On the naked model, face
+record m009 has U bounds 0.2053–0.7778 and Blender V bounds 0.1890–0.6570.
+A Cycles test render confirms readable face, hair and shirt textures;
+remaining artifacts on the upper arm and some details are not resolved.

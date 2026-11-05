@@ -76,6 +76,17 @@ for f in GMD_FILES:
         if ob.type == 'MESH':
             assert max(abs(ob.matrix_world[i][j] - arm.matrix_world[i][j])
                        for i in range(4) for j in range(4)) < 1e-6, 'Double axis conversion'
+            if ob.data.uv_layers:
+                assert len(ob.data.uv_layers) == 1, 'Unexpected empty UV2'
+                assert ob.data.uv_layers.active.name == 'UVMap'
+                assert ob.data.uv_layers['UVMap'].active_render
+                for mat in ob.data.materials:
+                    for node in mat.node_tree.nodes:
+                        if node.type == 'TEX_IMAGE':
+                            links = node.inputs['Vector'].links
+                            assert links and links[0].from_node.type == 'UVMAP'
+                            assert links[0].from_node.uv_map == 'UVMap'
+
     out = os.path.join(OUT, f)
     bpy.ops.export_scene.gmd(filepath=out)
     ok = bytecmp(os.path.abspath(f), out, f)
