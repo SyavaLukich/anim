@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.8.3
+# Binary Domain Blender addon — v0.8.4
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.

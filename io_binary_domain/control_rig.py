@@ -36,7 +36,7 @@ LIMIT_PROFILES = {
     'neck':  {'flex': (0.65, 0.55), 'side': (0.70, 0.65), 'twist': (1.00, 0.90)},
 }
 HYPER_EXTENSION = 0.12  # rad of allowed bend past straight, for every hinge
-RIG_VERSION = 'v0.8.3'
+RIG_VERSION = 'v0.8.4'
 # Clavicle/shoulder controls: single-bone drivers for kata_*_n.
 SHOULDERS = {'shoulder_l': 'kata_l_n', 'shoulder_r': 'kata_r_n'}
 
@@ -272,12 +272,22 @@ def _apply_limits(ctrl, limb, joints):
                 low, high = max(-math.pi, low), min(math.pi, high)
             ranges[k] = (low, high)
         for k, axis_name in enumerate('xyz'):
-            if i == 1 and k == 1 and hinge != 1:
-                # The solver's twist parameter for the end segment sits
-                # near its pi singularity on mirrored chains and swings
-                # wildly between equivalent poses; limiting it rejects
-                # valid animation.  Hinge swing limits still apply.
+            if k == 1 and ((i == 1 and hinge != 1) or abs(tau) > 2.2):
+                # No twist limit for end segments (their twist parameter
+                # sits near its pi singularity and swings wildly between
+                # equivalent poses), nor for any bone whose calibrated
+                # twist is near the +/-pi wrap: the resting value would
+                # sit on the interval edge and the clamp rolls the whole
+                # chain.  Hinge swing limits still apply.  Remove a
+                # stale driver from an older calibration, or it would
+                # simply switch the limit back on.
                 setattr(pb, f'use_ik_limit_{axis_name}', False)
+                stale = f'pose.bones["{pb.name}"].use_ik_limit_{axis_name}'
+                adata = ctrl.animation_data
+                if adata:
+                    for fcurve in list(adata.drivers):
+                        if fcurve.data_path == stale:
+                            adata.drivers.remove(fcurve)
                 continue
             low, high = ranges[k]
             if k == 1:
@@ -509,7 +519,8 @@ def create(source, ik_default=False):
         raise
 
 
-def _calibrate_pole(ctrl, limb, desired, endpoint):
+def _calibrate_pole(ctrl, limb, desired, endpoint, tip_frame=None,
+                    use_frame=False):
     """Newton-calibrate pole_angle so the solved joint lands on the FK joint.
 
     Blender's pole convention (which local axis, which sign) depends on the
@@ -530,6 +541,18 @@ def _calibrate_pole(ctrl, limb, desired, endpoint):
 
     def signed_error():
         refresh(ctrl)
+        if use_frame and tip_frame is not None:
+            # Neck: the mechanism mid joint is not displayed (the face
+            # clone takes position from the chain tip and rotation from
+            # the goal), while a rolled resting frame flips the chain
+            # when the goal moves.  Calibrate the solved tip frame onto
+            # the frame the mechanism bases were built from.
+            x = ctrl.pose.bones['MCH_'+limb+'_1'].matrix.to_3x3().col[0]
+            v = x-axis*x.dot(axis)
+            xt = tip_frame.to_3x3().col[0]
+            wt = xt-axis*xt.dot(axis)
+            if v.length > 1e-6 and wt.length > 1e-6:
+                return math.atan2(axis.dot(v.cross(wt)), v.dot(wt))
         joint = ctrl.pose.bones['MCH_'+limb+'_1'].head.copy()
         v = joint-root
         v -= axis*v.dot(axis)
@@ -562,6 +585,19 @@ def _calibrate_pole(ctrl, limb, desired, endpoint):
         if error is None or abs(error) < 1e-6:
             break
         set_angle(ik.pole_angle-error/sensitivity)
+    error = signed_error()
+    if error is not None and abs(error) > 0.02:
+        # Newton landed in a flipped basin (short/near-straight chains
+        # have near-zero sensitivity until the plane snaps).  Scan the
+        # full circle and keep the angle whose solved joint best
+        # matches the FK bend plane.
+        best = (abs(error), ik.pole_angle)
+        for k in range(16):
+            set_angle(-math.pi+k*(math.pi/8))
+            scanned = signed_error()
+            if scanned is not None and abs(scanned) < best[0]:
+                best = (abs(scanned), ik.pole_angle)
+        set_angle(best[1])
     refresh(ctrl)
 
 def _segment_matrix(start, end, hinge):
@@ -656,19 +692,33 @@ def _position_ik_controls(ctrl, limb, matrices, key=True):
     if hinge.length < 1e-6:
         hinge = Vector((1,0,0))
     hinge.normalize()
-    for _pass in (0, 1):
+    # Set the segment bases with the solver muted: converted against a
+    # live solver's transient frame, a basis silently encodes that
+    # transient (the solver was already compensating it), and the chain
+    # drifts as soon as an ancestor chain changes state.  Muted, the
+    # evaluated frame is the basis itself, so the conversion anchors
+    # the mechanism canonically; the solver then starts from these
+    # bases at every later evaluation.
+    ik_constraint = next(
+        (c for c in ctrl.pose.bones[f'MCH_{limb}_1'].constraints
+         if c.type == 'IK'), None)
+    was_muted = ik_constraint.mute if ik_constraint is not None else False
+    if ik_constraint is not None:
+        ik_constraint.mute = True
+    try:
         for i in (0, 1):
             mechanism = ctrl.pose.bones[f'MCH_{limb}_{i}']
             refresh(ctrl)
             _set_bone_matrix(mechanism, _segment_matrix(
                 joints[i], joints[i+1], hinge))
             refresh(ctrl)
-        if _pass == 0:
-            _calibrate_pole(ctrl, limb, matrices[1].translation,
-                            matrices[2].translation)
-        # Second pass: segment bases are set against the *calibrated*
-        # parent evaluation, so their local rotations stay clean hinge
-        # rotations instead of absorbing the pre-calibration solver pose.
+    finally:
+        if ik_constraint is not None:
+            ik_constraint.mute = was_muted
+    _calibrate_pole(ctrl, limb, matrices[1].translation,
+                    matrices[2].translation,
+                    tip_frame=_segment_matrix(joints[1], joints[2], hinge),
+                    use_frame=(KINDS[limb] == 'neck'))
     # Pole direction fixes the two joint positions, but not necessarily the
     # axial frame of either segment.  The OUT bones absorb that difference.
     for i in (0, 1):
@@ -717,34 +767,70 @@ def _key_previous_switch(ctrl, limb, direction):
     ctrl.keyframe_insert(data_path=f'["{prop_name}"]', frame=frame-1)
 
 
+# Chains whose mechanism roots ride another chain's output: the arm and
+# neck roots sit on the spine, so healing the spine moves their parent
+# frame under already-anchored mechanism bases.
+DEPENDENTS = {'spine': ('arm_l', 'arm_r', 'neck')}
+
+
+def _settle(ctrl, limb, matrices, key):
+    """Re-pose a limb from its FK reference until the evaluated chain
+    sits on it (Blender's IK is history-dependent, so the frame the OUT
+    bones were compensated against can differ from the settled one)."""
+    names = LIMBS[limb]
+    for _ in range(3):
+        refresh(ctrl)
+        diff = max(abs(ctrl.pose.bones[n].matrix[i][j]-m[i][j])
+                   for n, m in zip(names, matrices)
+                   for i in range(4) for j in range(4))
+        if diff <= 2e-3:
+            break
+        _position_ik_controls(ctrl, limb, matrices, key=key)
+        _apply_limits(ctrl, limb, [m.translation for m in matrices])
+
+
 def match(ctrl,limb,direction,key=True,enable=True):
     names=LIMBS[limb]; refresh(ctrl)
     if key:
         _key_previous_switch(ctrl, limb, direction)
     if direction=='IK':
-        # Read the FK reference with this chain's IK blend off: with it
-        # on, the clones show the current IK result, and matching from
-        # that preserves even a twisted solver state forever.  The FK
-        # bases are the ground truth a repair must return to.
-        ctrl['bd_ik_'+limb]=0.0
+        # Read the FK reference with every chain's IK blend off.  With
+        # blends on, the clones show current IK results -- and a limb's
+        # parents ride other chains (shoulders sit on the spine), so
+        # matching one limb against another's twisted output poisons
+        # its goals and preserves the twist forever.  The FK bases are
+        # the ground truth a repair must return to.
+        saved={name: ctrl['bd_ik_'+name] for name in LIMBS}
+        for name in LIMBS:
+            ctrl['bd_ik_'+name]=0.0
         refresh(ctrl)
         matrices=_joint_matrices(ctrl, limb)
         _position_ik_controls(ctrl, limb, matrices, key=key)
-        # The mechanism is posed against transient solver states; if the
-        # evaluated chain is not yet on the FK reference (rolled or
-        # flipped starting state), pose it once more from the same
-        # reference -- the second pass starts near the solution.
-        refresh(ctrl)
-        names=LIMBS[limb]
-        diff=max(abs(ctrl.pose.bones[n].matrix[i][j]-m[i][j])
-                 for n,m in zip(names,matrices) for i in range(4)
-                 for j in range(4))
-        if diff > 2e-3:
-            _position_ik_controls(ctrl, limb, matrices, key=key)
+        for name,value in saved.items():
+            ctrl['bd_ik_'+name]=value
         # Rigs saved by older versions keep their limit values as data;
         # recalibrating here repairs them without recreating the rig.
         _apply_limits(ctrl, limb, [m.translation for m in matrices])
         ctrl['bd_ik_'+limb]=1.0 if enable else 0.0
+        if enable:
+            _settle(ctrl, limb, matrices, key)
+            # Healing this chain moved the parent frame of its dependent
+            # chains (arms/neck ride the spine).  Re-settle a dependent
+            # whose goal still sits on its FK endpoint -- a hand-posed
+            # goal means an animator put it there; leave it alone.
+            for dep in DEPENDENTS.get(limb, ()):
+                saved_dep = {name: ctrl['bd_ik_'+name] for name in LIMBS}
+                for name in LIMBS:
+                    ctrl['bd_ik_'+name] = 0.0
+                refresh(ctrl)
+                dep_matrices = _joint_matrices(ctrl, dep)
+                for name, value in saved_dep.items():
+                    ctrl['bd_ik_'+name] = value
+                refresh(ctrl)
+                goal = ctrl.pose.bones['MCH_goal_'+dep].matrix
+                if max(abs(goal[i][j]-dep_matrices[2][i][j])
+                       for i in range(4) for j in range(4)) <= 2e-3:
+                    _settle(ctrl, dep, dep_matrices, key)
     else:
         matrices=[ctrl.pose.bones[n].matrix.copy() for n in names]
         ctrl['bd_ik_'+limb]=0.0; refresh(ctrl)
@@ -759,6 +845,14 @@ def match(ctrl,limb,direction,key=True,enable=True):
 
 def match_shoulder(ctrl, key, key_switch=True):
     """Place a clavicle control on the current kata pose and enable it."""
+    # Same FK-reference rule as match(): kata rides the spine output,
+    # so read it with every IK blend off.
+    saved={name: ctrl['bd_ik_'+name] for name in LIMBS}
+    saved_sh={k: ctrl['bd_'+k] for k in SHOULDERS}
+    for name in LIMBS:
+        ctrl['bd_ik_'+name]=0.0
+    for k in SHOULDERS:
+        ctrl['bd_'+k]=0.0
     refresh(ctrl)
     target = ctrl.pose.bones[SHOULDERS[key]].matrix.copy()
     control = ctrl.pose.bones['CTRL_'+key]
@@ -773,6 +867,10 @@ def match_shoulder(ctrl, key, key_switch=True):
             ctrl.keyframe_insert(data_path=f'["bd_{key}"]',
                                  frame=scene.frame_current-1)
     control.matrix = target @ offset.inverted_safe()
+    for name, value in saved.items():
+        ctrl['bd_ik_'+name]=value
+    for k, value in saved_sh.items():
+        ctrl['bd_'+k]=value
     ctrl['bd_'+key] = 1.0
     refresh(ctrl)
     if key_switch:

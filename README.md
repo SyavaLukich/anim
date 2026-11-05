@@ -6,6 +6,14 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.8.4:** Match IK is now a true repair operation — mechanism bases are
+posed with the solver muted (canonical anchoring), each matched limb is
+settled onto its FK reference under the final blend state (Blender's IK
+is history-dependent), spine dependents (arms/neck) are re-settled when
+their goals were never hand-posed, near-wrap twist limits are skipped,
+and the neck calibrates its pole by segment frame. A rig saved twisted
+by any older version returns to the exact bind pose via Match IK.
+
 **v0.8.3:** spine/neck pole side and Match reference fixes — at bind the
 chest sits in front of the waist–neck line, which put the spine pole in
 front and rolled the torso (crossed arms); poles now stay on the
