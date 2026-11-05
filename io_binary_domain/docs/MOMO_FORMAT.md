@@ -107,12 +107,16 @@ All channel boundaries were checked in the extracted `motion.par` resources:
 
 Every face clip has 184 channels. The body T-pose has 644 channels, and
 its layout must not be assumed to be 161 identical XYZ+quaternion groups:
-two helper nodes have a scalar in the fourth slot. `p_gen.mma` NOD3 declares
+the first eight channels are reserved scalar zeros and are not bone transforms.
+The previous flat grouping incorrectly assigned those channels to the first
+two nodes and shifted later transforms. `p_gen.mma` NOD3 declares
 161 nodes but 636 indexed channels, with two node flags equal to 6 instead
-of 1. MOMA metadata parsing no longer equates this declaration with 4×nodes;
-the face retargeter still explicitly rejects this different body rig.
-All three files pass unchanged, byte-exact channel patching. This validates
-binary preservation, **not** body retargeting or a full-body pose in Blender.
+of 1. Each flag-1 node has four channel-table entries at its declared offset;
+flag-6 nodes have none. The table references TRK2 indices 8..643. Node 38 and
+65 offsets do not advance; they are procedural nodes, not scalar rotations.
+`pose_nodes(clip, rig)` now follows this indirection explicitly.
+All three files pass unchanged, byte-exact channel patching. This validates binary preservation; the separate v0.3.0 body retargeter and
+its Blender regressions are described below.
 
 Large-library loading first reads metadata without allocating channel objects.
 Only the selected clip is decoded. The original file remains external; loaded
@@ -133,3 +137,38 @@ it never unlinks an object/NLA user and leaves unrelated user Actions alone.
 The confirmation explicitly warns that edited unused MOMO copies are included.
 Tests cover this distinction, list selection/filtering, small-file lazy loading,
 and unregister/register lifecycle in addition to the large-file tests.
+
+## v0.3.0 full-body T-pose retarget
+
+The GMD bone record stores local translation at `+0x20`, a unit xyzw bind
+quaternion at `+0x30`, and scale at `+0x40`. The existing armature display
+uses `+0x60` as an axis-angle-like frame; those direction/length fields must
+**not** be mistaken for the physical bind quaternion in body retargeting.
+The importer remains byte-preserving; the body path stores the real bind
+quaternions separately instead of changing existing import/export semantics.
+
+For mapped target bone i, compose the actual GMD local quaternions along the
+target hierarchy to obtain B_i. Compose decoded MOMA transforms to obtain
+source world rotation S_i. The deformation rotation is D_i = S_i B_i^-1.
+For a target parent p, retargeted joint position is
+P_i = P_p + D_p (restHead_i - restHead_p), with each target root held at rest.
+The Blender target matrix has rotation D_i * importedRestRotation_i and
+translation P_i. Convert to matrix_basis using `convert_local_to_pose` with
+the retargeted parent matrix, not a guessed Euler order. Thus the displayed
+rest basis cancels in skinning while true target bind orientations are used.
+Unmapped/procedural target nodes inherit the target parent's deformation.
+
+Only the verified p_gen_tpose clip (644 channels, first eight scalar zeros,
+161-node p_gen rig) is enabled. This is a length-preserving static retarget:
+root-motion controls and arbitrary body animation codecs are not inferred.
+Matched face/hair/accessory rotations are included; unmatched model nodes
+retain target offsets and follow their parents. Target proportions, topology,
+weights and rest frames are not replaced by the generic rig's positions.
+
+Tests on all five supplied Fey GMDs check horizontal bilateral arms, unchanged
+length of every target parent offset, real vertex movement/finite geometry,
+raw-word preservation, wrong-rig/partial-skeleton rejection, legacy bind-data
+migration, unsupported auxiliary controls and Action save/reopen application.
+A front-view Cycles render of the naked model was inspected in rest and T-pose.
+This is not a comparison against engine screenshots or validation of game-side
+export, temporal locomotion or engine procedural-node evaluation.

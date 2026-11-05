@@ -6,6 +6,10 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.3.0:** static full-body `p_gen_tpose` retarget with automatic bundled
+`p_gen.mma`, true GMD bind rotations, preserved target bone lengths/root, and
+five-model geometry/persistence regressions. Not temporal locomotion.
+
 **v0.2.3:** standard MOMO file selector and explicit file-versus-folder
 validation for MOMO/MOMA paths, including pasted quotes.
 

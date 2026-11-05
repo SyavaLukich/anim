@@ -147,15 +147,35 @@ def _parse_tracks(data, off, ln):
     return tracks, count
 
 
-def pose_nodes(clip):
-    """Return (position xyz, quaternion xyzw) per flat face-rig node."""
-    if len(clip.tracks) % 4:
-        raise ValueError('MOMO channel count is not divisible by four')
+def pose_nodes(clip, rig=None):
+    """Decode node transforms, honoring NOD3 indirection when a rig is supplied.
+
+    p_gen reserves channels 0..7 outside the node table. Flag-6 procedural
+    nodes consume no channels and return None; they are NOT scalar rotations.
+    """
+    if rig is None:
+        if len(clip.tracks) % 4:
+            raise ValueError('MOMO channel count is not divisible by four')
+        groups = [range(i, i + 4) for i in range(0, len(clip.tracks), 4)]
+    else:
+        indices = rig['channel_indices']
+        groups = []
+        for flag, off in zip(rig['node_flags'], rig['node_offsets']):
+            if flag == 6:
+                groups.append(None)
+            elif flag == 1 and off + 4 <= len(indices):
+                groups.append(indices[off:off + 4])
+            else:
+                raise ValueError('unsupported MOMA node declaration')
     nodes = []
-    for i in range(0, len(clip.tracks), 4):
-        group = clip.tracks[i:i + 4]
-        if ([t.kind for t in group] !=
-                ['scalar', 'scalar', 'scalar', 'quaternion']):
+    for ids in groups:
+        if ids is None:
+            nodes.append(None)
+            continue
+        if any(i < 0 or i >= len(clip.tracks) for i in ids):
+            raise ValueError('MOMA channel index exceeds MOMO channel count')
+        group = [clip.tracks[i] for i in ids]
+        if [t.kind for t in group] != ['scalar', 'scalar', 'scalar', 'quaternion']:
             raise ValueError('unexpected MOMO node channel layout')
         nodes.append((tuple(t.value for t in group[:3]), group[3].value))
     return nodes
@@ -242,6 +262,12 @@ def parse_moma(data):
         if parent_off + count * 2 > o + ln:
             raise ValueError('truncated MOMA parent table')
         res['parents'] = list(struct.unpack_from('>%dh' % count, data, parent_off))
+        offsets_off = parent_off + count * 2
+        indices_off = offsets_off + count * 2
+        if indices_off + channels * 2 != o + ln:
+            raise ValueError('invalid MOMA node/channel table size')
+        res['node_offsets'] = list(struct.unpack_from('>%dH' % count, data, offsets_off))
+        res['channel_indices'] = list(struct.unpack_from('>%dH' % channels, data, indices_off))
         for i, parent in enumerate(res['parents']):
             if parent >= i or parent < -1:
                 raise ValueError('unsupported cyclic/out-of-order MOMA hierarchy')

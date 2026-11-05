@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.2.3
+# Binary Domain Blender addon — v0.3.0
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -69,7 +69,8 @@ of the head. A recorded, automatically estimated uniform scale adapts source
 head height to the imported GMD. This retarget scale is a model adaptation,
 not part of the verified binary encoding and not a claim of engine-identical
 retargeting for arbitrary characters. The head anchor is held at model rest;
-full-body motion/root-motion blending is outside this implementation.
+temporal full-body/root-motion blending remains outside this implementation;
+the static p_gen T-pose has a separate body retargeter described below.
 
 ### Clip list and memory usage (v0.2.2)
 
@@ -102,13 +103,37 @@ stopped when a new catalog is loaded. These changes reduce addon overhead;
 other causes of slow viewports (modifiers, scene complexity, drivers) still
 need to be diagnosed in the affected scene.
 
-`p_gen_basic.mmo` is **not a face-pose file**. It has a single static clip,
-`p_gen_tpose`, for the 161-node `p_gen` body rig, including special helper
-nodes with a different channel layout. Its constant channels can now be
-read and patched losslessly by the codec, but **body-rig retargeting into
-Blender is not implemented**. The UI rejects it with a rig-specific message,
-not an unsupported-opcode error. Choosing `p_gen.mma` does not turn this
-facial retargeter into a body-animation importer.
+### Full-body T-pose (v0.3.0)
+
+1. Select an imported **full GMD armature**.
+2. **Load MOMO clips** → choose `p_gen_basic.mmo`.
+3. Leave **Optional MOMA file** blank: bundled `rigs/p_gen.mma` is selected
+   automatically. If supplying a rig manually, select `p_gen.mma`, not `f_man.mma`.
+4. The single `p_gen_tpose` clip is applied immediately and is also available
+   in the panel list via **Apply selected clip**.
+
+This creates a real bone-transform Action for the body, arms, hands/fingers,
+legs and matching rig nodes. It is **one static T-pose**, not a walk cycle.
+The body path does not generate a synthetic facial preview. Target bone
+parent-offset lengths and root anchor are preserved; model-specific unmapped
+bones follow their target parents rather than being moved onto generic rig
+positions. No geometry, rest pose, skin weights or materials are overwritten.
+
+The source node/channel mapping comes from MOMA NOD3: 8 reserved zero channels
+precede 636 indexed channels. Two flag-6 procedural nodes consume no channels
+and are not treated as quaternion nodes. Rotations are retargeted relative
+to the target's actual GMD bind quaternions at bone-record `+0x30`, composed
+through its hierarchy; these are not the `+0x60` direction/length fields.
+New GMD imports store these bind quaternions in the scene. Older scenes read
+them from the original `gmd_source`, so keep that GMD available or re-import.
+Loaded Actions themselves survive save/reopen without the source files.
+
+Validated on all five supplied Fey variants, including visible mesh movement,
+horizontal bilateral arms, every parent-offset length, finite geometry and
+save/reopen. General temporal body animations, nonzero reserved body controls,
+engine procedural-node simulation, and game-side export of this retargeted
+body pose are **not validated/supported by this new body path**. A partial
+skeleton missing required body joints or a mismatched MOMA fails explicitly.
 
 ### Exact source data
 
@@ -203,3 +228,5 @@ blindly replaced or removed (which would damage Windows/UNC paths).
 Python exception text can show `\\` for a single actual backslash.
 Path checks are covered by `tests/test_input_paths.py` under bpy; native
 Windows GUI/filesystem behavior has not been exercised in this Linux sandbox.
+
+Body regression: `LD_LIBRARY_PATH=/home/user/xlibs python3 tests/test_body_retarget.py` (local game fixtures, not distributed).

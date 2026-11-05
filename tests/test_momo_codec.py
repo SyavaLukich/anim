@@ -87,6 +87,17 @@ class ConstantChannels(unittest.TestCase):
         with self.assertRaises(ValueError):
             mmo.decode_clip(unknown, indexed[0])
 
+    def test_node_table_indirection_and_procedural_node(self):
+        tracks, _ = self.parse(b'\x00\x2e' * 8 +
+                               b'\x00\x2e' * 3 + b'\x00\x6e', 12)
+        clip = mmo.Clip(); clip.tracks = tracks
+        rig = {'channel_indices': [8, 9, 10, 11],
+               'node_flags': [1, 6], 'node_offsets': [0, 4]}
+        self.assertEqual(mmo.pose_nodes(clip, rig), [((0, 0, 0), (0, 0, 0, 1)), None])
+        rig['channel_indices'][-1] = 12
+        with self.assertRaisesRegex(ValueError, 'channel index'):
+            mmo.pose_nodes(clip, rig)
+
     def test_unsupported_and_invalid(self):
         for payload in [b'\x01\x63', b'\x01\x20\x00',
                         struct.pack('>HhHh', 0x120, 0, 0, 0), b'\x01\x6e\x00\x00']:

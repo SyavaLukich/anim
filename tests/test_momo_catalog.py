@@ -52,15 +52,12 @@ for filename, expected in [('f_man_all.mmo', 4032), ('f_man_motionviewer.mmo', 3
     assert len(bpy.data.actions) - before == 2  # cached Action reused
     print('selected:', name, flush=True)
 
-# Unknown body rig must fail clearly and must not damage the current Action.
+# Body T-pose now has its own retargeter and automatically selected rig.
 previous = arm.animation_data.action
-try:
-    addon.load_momo_actions(arm, '/tmp/motion_samples/p_gen_basic.mmo')
-except addon.GmdExportError as exc:
-    assert 'Body-rig retargeting' in str(exc)
-else:
-    raise AssertionError('body file incorrectly treated as face expressions')
-assert arm.animation_data.action == previous
+assert addon.load_momo_actions(arm, '/tmp/motion_samples/p_gen_basic.mmo') == 1
+assert arm.animation_data.action['gmd_momo_kind'] == 'constant_body_pose'
+# Restore the large catalog for the existing persisted/unloaded-clip tests.
+addon.load_momo_actions(arm, '/tmp/motion_samples/f_man_motionviewer.mmo')
 body = bytearray(Path('/tmp/motion_samples/p_gen_basic.mmo').read_bytes())
 clips = mmo.parse_momo(body)
 assert len(clips) == 1 and clips[0].name == 'p_gen_tpose'
@@ -134,5 +131,5 @@ assert any(flags) and all(bool(flag) == ('eye_close' in item.name.lower())
                            for flag, item in zip(flags, arm.bdomain_momo_clips))
 addon.unregister()
 addon.register()
-print('PASS: both catalogs, all-channel exact patches, selection, reload, body guard, small-file lazy mode, UI list, safe cleanup', flush=True)
+print('PASS: both catalogs, all-channel exact patches, selection, reload, body dispatch, small-file lazy mode, UI list, safe cleanup', flush=True)
 os._exit(0)
