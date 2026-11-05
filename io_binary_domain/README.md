@@ -172,3 +172,17 @@ The bundled `f_man.mma` rig is used when the rig field is empty. Operator/RNA
 regression tests verify that nested path fields have no file-picker subtype;
 the standalone MOMO import operator loads all 95 test clips successfully.
 GUI interaction in Blender 5.1 is not covered by the headless test suite.
+
+## MOMO playback limitation and Action persistence (v0.1.7)
+
+MOMO import is NOT currently a visible facial animation implementation.
+It keys raw `gmd_c0..2` properties once, at frame 1, and these properties have
+no drivers converting them to bone transforms. An Action's frame range does
+not create motion. The exact game parameter-to-transform mapping remains
+unresolved; experimental Euler baking is not a validated substitute.
+The panel and standalone import report now explicitly warn about this.
+
+Imported Actions now have Fake User enabled so all clips survive saving and
+reopening the blend, including those not assigned to the armature. A new
+save/reopen regression verifies persistence of all 95 Actions. To recover
+clips discarded from an older saved scene, re-import the original MOMO file.

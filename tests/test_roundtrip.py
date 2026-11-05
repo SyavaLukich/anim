@@ -218,6 +218,15 @@ print('   repatched %d tracks/clip, byte-identical: %s' % (k // len(clips), same
 momo_ok = names_ok and vals_ok and same
 results.append(('momo', momo_ok))
 
+# Unassigned Actions must survive saving/reopening, not just exist in memory.
+saved = os.path.join(OUT, 'momo_persistence.blend')
+bpy.ops.wm.save_as_mainfile(filepath=saved)
+bpy.ops.wm.open_mainfile(filepath=saved, load_ui=False, use_scripts=False)
+kept = [a for a in bpy.data.actions if a.get('gmd_raw_momo')]
+persist_ok = len(kept) == len(clips) and all(a.use_fake_user for a in kept)
+print('   MOMO Actions after save/reopen: %d (expected %d)' % (len(kept), len(clips)))
+results.append(('momo-save-reopen', persist_ok))
+
 # ---------------------------------------------------------------- summary
 print('== SUMMARY ==')
 ok_all = True

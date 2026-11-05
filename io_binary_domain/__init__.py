@@ -12,7 +12,7 @@ Binary Domain (.gmd / .mmo) import-export for Blender.
 bl_info = {
     "name": "Binary Domain: GMD / MOMO",
     "author": "Arena agent",
-    "version": (0, 1, 6),
+    "version": (0, 1, 7),
     "blender": (4, 1, 0),
     "location": "File > Import-Export, 3D View > N-panel > Binary Domain",
     "description": "Import/export Binary Domain (Sega, 2012) GSGM models and MOMO face animations",
@@ -528,6 +528,8 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
     maxf = 1
     for c in clips:
         act = bpy.data.actions.new('%s__%s' % (prefix, c.name))
+        act.use_fake_user = True
+        act['gmd_raw_momo'] = True
         prev = arm_obj.animation_data.action
         arm_obj.animation_data.action = act
         maxf = max(maxf, c.frames)
@@ -547,6 +549,7 @@ def load_momo_actions(arm_obj, mmo_path, mma_path=None, bake_euler=False):
                 pb.keyframe_insert(data_path='rotation_euler', frame=1)
         act.frame_range = (1, max(1, c.frames))
         arm_obj.animation_data.action = prev
+    arm_obj['gmd_momo_mode'] = 'experimental_euler' if bake_euler else 'raw_only'
     arm_obj['gmd_momo'] = mmo_path
     arm_obj['gmd_clips'] = json.dumps([c.name for c in clips])
     bpy.context.scene.frame_end = max(1, maxf)
@@ -578,7 +581,7 @@ class BDOMAIN_OT_load_momo(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
-        self.report({'INFO'}, 'Imported %d MOMO clips' % n)
+        self.report({'WARNING'}, 'Imported %d raw MOMO clips; visible facial animation is not implemented' % n)
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -703,6 +706,8 @@ class BDOMAIN_PT_panel(bpy.types.Panel):
             lay.operator('bdomain.apply_clip')
             box = lay.box()
             box.label(text='%d clips' % len(json.loads(ob['gmd_clips'])))
+            box.label(text='Raw MOMO parameters only', icon='INFO')
+            box.label(text='No decoded facial motion yet')
         else:
             if ob and ob.type == 'ARMATURE' and ob.get('gmd_source'):
                 lay.operator('bdomain.load_momo')
