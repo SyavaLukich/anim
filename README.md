@@ -6,16 +6,24 @@ GMD model import/patch export and decoded MOMO facial expressions.
 - [MOMO channel decoding evidence](io_binary_domain/docs/MOMO_FORMAT.md)
 - [Installable addon ZIP](binary_domain_addon.zip)
 
+**v0.8.8:** conservative hip-helper correction. The v0.8.7 local rotation
+share from `asi2_*_n` onto its `asi2_*_sup` child double-counted knee flexion
+in the tested squat. These two shares are now omitted while the shoulder and
+other helper shares remain. On that pose the arm metrics are unchanged
+(p99/max edge stretch 1.459/2.521); leg p99 improves 1.703→1.683 and the
+worst leg stretch returns 3.856→2.856 (the helpers-off baseline). This is a
+measured regression guard, **not a full hip fix or exact OPE0 emulation**.
+Recreate existing control rigs to apply the updated wiring.
+
 **v0.8.7:** deformation helpers fixed (per updated `требования.txt`:
-"shoulders and hip deform in some poses"). All OPE0 helper bones
-(`*_sup`: thigh/shin muscles, forearm twist, deltoid, chest) are now
-wired — previously only twist/elbow/knee-named ones, and the whole
-system defaulted to off. Each helper takes a 35% share of the
-neighbouring joint's local rotation on top of its FK pose, and
-**Helper blend now defaults to 1**. Measured on the reported squat
-pose: worst-1% skin edge stretch improves 1.78→1.46 (arms) and
-1.85→1.70 (legs). Convert still reproduces raw FK exactly (helpers
-are suspended while converting). Recreating the rig is required for
+"shoulders and hip deform in some poses"). OPE0 helper bones
+(`*_sup`: thigh/shin muscles, forearm twist, deltoid, chest) were wired —
+previously only twist/elbow/knee-named ones, and the system defaulted to off.
+Each helper takes a 35% share of a neighbouring joint's local rotation on top
+of its FK pose, and **Helper blend defaults to 1**. Measured on the reported
+squat pose before the v0.8.8 exception: worst-1% skin edge stretch improved
+1.78→1.46 (arms) and 1.85→1.70 (legs). Convert still reproduces raw FK exactly
+(helpers are suspended while converting). Recreating the rig is required for
 the new wiring on older scenes.
 
 **v0.8.6:** shoulder-girdle auto-follow (per updated `требования.txt`) —

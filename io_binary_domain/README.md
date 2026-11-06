@@ -1,4 +1,4 @@
-# Binary Domain Blender addon — v0.8.6
+# Binary Domain Blender addon — v0.8.8
 
 Import Binary Domain GSGM (`.gmd`) models and decode the constant facial
 expressions in `f_man_pattern_fey.mmo` into actual bone transforms.
@@ -324,11 +324,13 @@ the controls through world-space constraints that can be disabled or removed.
 - Each foot control has a **roll** property (radians): positive rolls over
   the toe pivot, negative over the heel pivot, around armature-local ground
   height Y=0. This is a manual pivot, not terrain detection.
-- **Helper blend** (default 1) shares each OPE0 helper bone's
-  neighbouring joint rotation onto it (35% local share), which keeps
-  shoulder/hip skin from collapsing in deep poses — an approximation
-  of the game's procedural helpers, not exact OPE0. It is suspended
-  while converting, so converted clips still match raw FK.
+- **Helper blend** (default 1) shares neighbouring joint rotation onto
+  OPE0-derived helper bones (35% local share), approximating the game's
+  procedural helpers, not exact OPE0. In v0.8.8, `asi2_l_sup` and
+  `asi2_r_sup` are deliberately excluded: the direct local copy from
+  `asi2_*_n` worsened maximum leg stretch in the reported squat. This is
+  a conservative regression fix, not a recovered hip operator. Sharing is
+  suspended while converting, so converted clips still match raw FK.
 - **Helper blend (approx.)** optionally shares driver deformation onto the
   named twist/elbow/knee helper bones, using the same approximate
   OPE0-derived identities as the v0.6 bake. It is not OPE0 execution.

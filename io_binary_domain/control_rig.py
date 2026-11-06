@@ -36,7 +36,12 @@ LIMIT_PROFILES = {
     'neck':  {'flex': (0.65, 0.55), 'side': (0.70, 0.65), 'twist': (1.00, 0.90)},
 }
 HYPER_EXTENSION = 0.12  # rad of allowed bend past straight, for every hinge
-RIG_VERSION = 'v0.8.7'
+RIG_VERSION = 'v0.8.8'
+# OPE0 IDs 11/12 target these helpers.  The supplied GMD's helper rest frames
+# differ from asi2_*_n by about 26 degrees; a local COPY_ROTATION double-counts
+# knee flexion in deep poses.  Leave them on their FK transforms until the
+# game's code-specific OPE0 operators are reproduced rather than guessed.
+HELPER_SHARE_EXCLUDED = frozenset(('asi2_l_sup', 'asi2_r_sup'))
 # Clavicle/shoulder controls: single-bone drivers for kata_*_n.
 SHOULDERS = {'shoulder_l': 'kata_l_n', 'shoulder_r': 'kata_r_n'}
 
@@ -441,6 +446,7 @@ def create(source, ik_default=False):
         helper_drivers={}
         for op in rig['operations']:
             name=rig['nodes'][op['target']]
+            if name in HELPER_SHARE_EXCLUDED: continue
             drivers=[rig['nodes'][i] for i in op['drivers'] if i>=0]
             if name not in source.data.bones or len(drivers)<2: continue
             original=source.data.bones[name]

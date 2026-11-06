@@ -82,6 +82,14 @@ def fixture_test():
     ctrl = rig.create(arm)
     assert ctrl.parent is arm and ctrl.get('bd_control_kind') == 'animator_v1'
     assert ctrl is not arm and len(ctrl.data.bones) > len(arm.data.bones)
+    assert ctrl['bd_helpers'] == 1.0
+    # The direct local share is unsafe for the two OPE0 ID 11/12 helpers:
+    # their bind axes differ from asi2_n, so knee flexion is double-counted.
+    for name in rig.HELPER_SHARE_EXCLUDED:
+        assert not any(c.name == rig.PREFIX+'helper share '+name
+                       for c in ctrl.pose.bones[name].constraints)
+    assert any(c.name == rig.PREFIX+'helper share asi1_twist_l_sup'
+               for c in ctrl.pose.bones['asi1_twist_l_sup'].constraints)
     assert arm.animation_data.action is original
     assert action_coords(original) == original_coords
     assert all(ctrl['bd_ik_' + limb] == 0.0 for limb in rig.LIMBS)

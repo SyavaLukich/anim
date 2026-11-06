@@ -329,8 +329,30 @@ EXE OPE0 loader D9B286..D9B456 converts the records to 16-byte runtime
 operation entries, replacing negative driver indices with zero, and invokes
 per-operation initialization through table 01366BC4. Runtime dispatch references
 013669BC at D8A4EC/D8A5F8. Examples: ID 5/6 wrapper 40FA70 -> F1FE20;
-ID 9/10 wrapper 40FAB0 -> F05E10. These code-specific operators are **not**
-implemented by the optional helper blend. Parsing the table is not executing it.
+ID 9/10 wrapper 40FAB0 -> F05E10. In the bundled rig, IDs 11/12 target
+`asi2_l/r_sup` and dispatch through wrapper 40FAD0 -> F1E870. These
+code-specific operators are **not** implemented by the optional helper blend.
+Parsing the table is not executing it.
+
+### Static analysis of the supplied game executable
+
+The split archive's `BinaryDomain.exe` was extracted for static inspection only
+(not executed). It is a 32-bit i386 PE (COFF timestamp 2012-05-31), SHA-256
+`d77e345676d97acf931607d660fc9c4d16c90c5fff9eb2ebeae4df15b934462d`.
+The executable contains class-name families `MotionFootwork_*` and
+`MotionAimControl_Face/Muzzle/Waist_*`; no separate IK DLL or recognizable
+generic `IKSolver` API was found. This absence is not proof that the stripped
+binary contains no general solver.
+
+The `MotionFootwork_RUN` path at VA `0x009AC280`/`0x009AC4B0` is a specialized
+postprocessor: it tracks two foot nodes, checks motion-timed intervals plus
+contact/geometric distance and angle conditions, then computes per-foot/root
+transform corrections. The update path accumulates the two foot contributions
+and applies a half-weighted root correction. It is therefore evidence for
+motion-specific footwork/contact correction, not an unrestricted arbitrary
+chain solver. Other `MotionFootwork_*` and aim-control classes are likewise
+archetype/role-specific. These findings do not recover the full OPE0 operator
+math or prove the complete absence of another solver elsewhere in the EXE.
 
 The optional correction baker is a separate approximation layer. It keeps the
 raw Action, solves fixed-length limb chains against source goals, then optionally
